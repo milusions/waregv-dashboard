@@ -151,7 +151,7 @@ function isValidRoverHost(h) {
     return /^(\d{1,3}(\.\d{1,3}){3}|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)$/i.test(h);
 }
 function getRoverIp() {
-    try { return normalizeRoverIp(localStorage.getItem(ROVER_IP_KEY)); } catch (e) { return '0.0.0.0'; }
+    try { return normalizeRoverIp(localStorage.getItem(ROVER_IP_KEY)); } catch (e) { return ''; }
 }
 function saveRoverIpAndReload(v) {
     const ip = normalizeRoverIp(v);
@@ -161,7 +161,7 @@ function saveRoverIpAndReload(v) {
     return true;
 }
 const ROVER_IP = getRoverIp();
-const ROVER_HOST = ROVER_IP;   // fallback only while the IP dialog is showing
+const ROVER_HOST = ROVER_IP ;   // fallback only while the IP dialog is showing
 
 const ROS_URL = 'ws://' + ROVER_HOST + ':9090';
 const ros = new ROSLIB.Ros({ url: ROS_URL });
