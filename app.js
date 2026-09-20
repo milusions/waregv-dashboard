@@ -22,7 +22,7 @@ const CFG = {
     },
     mapFrame: 'map',
     baseFrames: ['base_link', 'base_footprint'],
-    cmdOrder: ['fl', 'fr', 'bl', 'br'],
+    cmdOrder: ['fr', 'fl', 'br', 'bl'],   // commanded: left<->right swapped
     // /joint_states velocity order: FR, FL, RR, RL
     jointOrder: ['fr', 'fl', 'br', 'bl'],
     jointOverrides: {},
