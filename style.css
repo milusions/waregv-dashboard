@@ -287,6 +287,8 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .joy-pad.active { cursor: grabbing; }
 .joy-read { font-size: 0.72rem; color: var(--muted); display: flex; gap: 14px; }
 .joy-read b { color: var(--text); font-weight: 600; }
+.joy-enable { flex: 0 0 auto; width: 120px; height: 30px; }
+.joy-enable.enabled { background: var(--danger); color: #fff; }
 
 /* ----- Control panel ----- */
 .ctrl-body { padding: 12px; display: flex; flex-direction: column; gap: 14px; }
@@ -1054,6 +1056,7 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
     overflow-y: auto; min-height: 0; touch-action: pan-y;
 }
 .map-nav-card.collapsed .map-nav-card-body { display: none; }
+.map-nav-card.mode-hidden { display: none; }
 .map-nav-card.collapsed .map-nav-card-hd { border-bottom: none; }
 
 /* ----- Helio: big face, thinking eyes, stage pill ----- */

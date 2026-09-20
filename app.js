@@ -1201,19 +1201,60 @@ async function fetchMaps(options = {}) {
     }
 }
 
-async function saveCurrentMap() {
+function openMapSaveModal() {
+    if (!ROVER_HOST) return notify('WARNING', 'Connect to the rover before saving a map.');
+    const modal = document.getElementById('map-save-modal');
+    const input = document.getElementById('save-map-name');
+    const error = document.getElementById('map-save-error');
     const select = document.getElementById('map-name-select');
-    const mapName = select ? select.value.trim() : '';
-    if (!mapName) {
-        return notify('WARNING', 'Select a map name before saving.');
+    if (error) error.textContent = '';
+    if (input) input.value = select && select.value && availableMaps.includes(select.value) ? select.value : '';
+    if (modal) modal.hidden = false;
+    setTimeout(() => input && input.focus(), 30);
+}
+
+function closeMapSaveModal() {
+    const modal = document.getElementById('map-save-modal');
+    if (modal) modal.hidden = true;
+}
+
+function setMapSaveError(message) {
+    const el = document.getElementById('map-save-error');
+    if (el) el.textContent = message;
+}
+
+async function saveMapFromModal() {
+    const input = document.getElementById('save-map-name');
+    const submit = document.getElementById('save-map-submit');
+    const mapName = (input ? input.value : '').trim();
+    setMapSaveError('');
+
+    if (!mapName) return setMapSaveError('Enter a map name.');
+    if (!/^[A-Za-z0-9 _.-]+$/.test(mapName) || mapName === '.' || mapName === '..') {
+        return setMapSaveError('Use only letters, numbers, spaces, _, -, and . in the map name.');
     }
+
+    if (submit) { submit.disabled = true; submit.classList.add('loading'); }
     try {
         await postJSON('/system/save_map', { map_name: mapName });
+        closeMapSaveModal();
         notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…');
-        setTimeout(fetchMaps, 1200);
+        setTimeout(async () => {
+            await fetchMaps({ notifyError: false });
+            const select = document.getElementById('map-name-select');
+            if (select && availableMaps.includes(mapName)) select.value = mapName;
+            updateMapButtons();
+        }, 1500);
     } catch (e) {
-        notify('ERROR', 'Failed to save map: ' + e.message);
+        setMapSaveError('Failed to save map: ' + e.message);
+    } finally {
+        if (submit) { submit.disabled = false; submit.classList.remove('loading'); }
     }
+}
+
+// Backward-compatible entry point for any existing callers.
+async function saveCurrentMap() {
+    openMapSaveModal();
 }
 
 let currentMode = null, pending = null, modeSelectTouched = false, modeTimer = null, polling = false;
@@ -1248,6 +1289,13 @@ async function fetchMode() {
     finally { clearTimeout(to); }
 }
 
+function renderNavCardVisibility() {
+    const card = document.getElementById('map-nav-card');
+    if (!card) return;
+    const autonomous = currentMode === 'nav' || currentMode === 'slam_update';
+    card.classList.toggle('mode-hidden', !autonomous);
+}
+
 function renderMode() {
     const chip = document.getElementById('mode-chip'), txt = document.getElementById('stat-mode');
     const btn = document.getElementById('deploy-btn');
@@ -1263,6 +1311,8 @@ function renderMode() {
     }
     btn.disabled = !!pending;
     btn.classList.toggle('loading', !!pending);
+
+    renderNavCardVisibility();
 
     document.querySelectorAll('.mode-loader').forEach(el => {
         el.classList.toggle('show', !!pending);
@@ -1337,17 +1387,67 @@ async function applySystemMode() {
 }
 
 const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
-const joy = { x: 0, y: 0, active: false, timer: null };
+const joyEnableBtn = document.getElementById('joy-enable-btn');
+const joy = { x: 0, y: 0, active: false, enabled: false, timer: null };
 
 function publishJoy() {
     if (!joyTopic || rosState !== 'up') return;
     const ms = Date.now();
-    joyTopic.publish(new ROSLIB.Message({
+    const msg = new ROSLIB.Message({
         header: { stamp: { sec: Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 }, frame_id: 'joy' },
+        // ROS convention used by the rover:
+        // axes[1] = forward/backward, axes[0] = left/right rotation.
+        // Up/forward on the web joystick gives +linear. Right/clockwise gives -angular.
         axes: [-joy.x, -joy.y, 0, 0, 0, 0, 0, 0],
-        buttons: new Array(12).fill(0)
-    }));
+        // Button index 4 is the enable/dead-man button expected by the rover.
+        buttons: [0, 0, 0, 0, joy.enabled ? 1 : 0, 0, 0, 0, 0, 0, 0, 0]
+    });
+    joyTopic.publish(msg);
 }
+
+function startJoyPublishing() {
+    clearInterval(joy.timer);
+    if (!joy.enabled) return;
+    joy.timer = setInterval(publishJoy, 1000 / CFG.joyRateHz);
+    publishJoy();
+}
+
+function stopJoyPublishing() {
+    clearInterval(joy.timer);
+    joy.timer = null;
+}
+
+function updateJoyEnableButton() {
+    if (!joyEnableBtn) return;
+    joyEnableBtn.textContent = joy.enabled ? 'Disable' : 'Enable';
+    joyEnableBtn.classList.toggle('enabled', joy.enabled);
+    joyEnableBtn.classList.toggle('btn-success', !joy.enabled);
+    joyEnableBtn.classList.toggle('btn-danger', joy.enabled);
+    joyEnableBtn.setAttribute('aria-pressed', joy.enabled ? 'true' : 'false');
+}
+
+function toggleJoyEnabled() {
+    joy.enabled = !joy.enabled;
+    if (!joy.enabled) {
+        joy.x = 0; joy.y = 0;
+        joyShow();
+    }
+    updateJoyEnableButton();
+    if (joy.enabled) {
+        startJoyPublishing();
+        notify('INFO', 'Joystick enabled. Publishing sensor_msgs/Joy on /joy with button[4] pressed.');
+    } else {
+        // Send a final disabled/dead-man message so the rover's button[4] gate stops the robot.
+        if (joyTopic && rosState === 'up') {
+            publishJoy();
+            setTimeout(publishJoy, 50);
+            setTimeout(publishJoy, 100);
+        }
+        stopJoyPublishing();
+        notify('INFO', 'Joystick disabled.');
+    }
+}
+
 function joyShow() {
     joyKnob.style.transform = 'translate(' + (joy.x * joyR()) + 'px,' + (joy.y * joyR()) + 'px)';
     document.getElementById('joy-x').textContent = (-joy.x).toFixed(2);
@@ -1360,24 +1460,28 @@ function joyMove(evt) {
     const mag = Math.hypot(dx, dy);
     if (mag > R) { dx *= R / mag; dy *= R / mag; }
     joy.x = dx / R; joy.y = dy / R; joyShow();
+    if (joy.enabled) publishJoy();
 }
 joyPad.addEventListener('pointerdown', (e) => {
+    if (!joy.enabled) {
+        notify('WARNING', 'Enable the joystick before driving.');
+        return;
+    }
     joyPad.setPointerCapture(e.pointerId); joyPad.classList.add('active');
     joy.active = true; joyMove(e);
-    clearInterval(joy.timer);
-    joy.timer = setInterval(publishJoy, 1000 / CFG.joyRateHz);
-    publishJoy();
 });
-joyPad.addEventListener('pointermove', (e) => { if (joy.active) joyMove(e); });
+joyPad.addEventListener('pointermove', (e) => { if (joy.active && joy.enabled) joyMove(e); });
 const joyEnd = () => {
     if (!joy.active) return;
     joy.active = false; joyPad.classList.remove('active');
-    clearInterval(joy.timer);
     joy.x = 0; joy.y = 0; joyShow();
-    publishJoy(); setTimeout(publishJoy, 50); setTimeout(publishJoy, 100);
+    if (joy.enabled) {
+        publishJoy(); setTimeout(publishJoy, 50); setTimeout(publishJoy, 100);
+    }
 };
 joyPad.addEventListener('pointerup', joyEnd);
 joyPad.addEventListener('pointercancel', joyEnd);
+updateJoyEnableButton();
 
 (function init() {
     let saved = null;
@@ -2223,6 +2327,9 @@ function renderPgmToCanvas(buffer, canvas) {
 
 window.openMapAddModal = openMapAddModal;
 window.closeMapAddModal = closeMapAddModal;
+window.openMapSaveModal = openMapSaveModal;
+window.closeMapSaveModal = closeMapSaveModal;
+window.saveMapFromModal = saveMapFromModal;
 window.addMapFromFiles = addMapFromFiles;
 window.openSelectedMapPreview = openSelectedMapPreview;
 window.closeMapPreview = closeMapPreview;
@@ -2232,7 +2339,9 @@ window.updateMapButtons = updateMapButtons;
 document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     const add = document.getElementById('map-add-modal');
+    const save = document.getElementById('map-save-modal');
     const preview = document.getElementById('map-preview-modal');
     if (add && !add.hidden) closeMapAddModal();
+    if (save && !save.hidden) closeMapSaveModal();
     if (preview && !preview.hidden) closeMapPreview();
 });

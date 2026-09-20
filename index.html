@@ -336,7 +336,7 @@
                                 </div>
                                 <div class="btn-row">
                                     <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
-                                    <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
+                                    <button class="btn btn-success" onclick="openMapSaveModal()">Save Map</button>
                                 </div>
                             </div>
                         </div>
@@ -383,6 +383,7 @@
                                 <span>fwd <b id="joy-y">0.00</b></span>
                                 <span>turn <b id="joy-x">0.00</b></span>
                             </div>
+                            <button id="joy-enable-btn" class="btn btn-success joy-enable" type="button" onclick="toggleJoyEnabled()">Enable</button>
                         </div>
                     </div>
                 </section>
@@ -429,6 +430,27 @@
             <div class="map-manager-foot">
                 <button class="btn btn-secondary" type="button" onclick="closeMapAddModal()">Cancel</button>
                 <button class="btn btn-primary" id="add-map-submit" type="button" onclick="addMapFromFiles()">Add Map</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="map-save-modal" class="map-manager-modal" hidden>
+        <div class="map-manager-card" role="dialog" aria-modal="true" aria-labelledby="map-save-title">
+            <div class="map-manager-head">
+                <div>
+                    <div id="map-save-title" class="map-manager-title">Save Current Map</div>
+                    <div class="map-manager-sub">Enter the name to use for the current SLAM map and its continuation data.</div>
+                </div>
+                <button class="map-manager-close" type="button" onclick="closeMapSaveModal()">&times;</button>
+            </div>
+            <div class="map-manager-body">
+                <label class="map-manager-label">Map name</label>
+                <input id="save-map-name" class="field" type="text" placeholder="e.g. small_warehouse_4" autocomplete="off">
+                <div id="map-save-error" class="map-manager-error"></div>
+            </div>
+            <div class="map-manager-foot">
+                <button class="btn btn-secondary" type="button" onclick="closeMapSaveModal()">Cancel</button>
+                <button class="btn btn-success" id="save-map-submit" type="button" onclick="saveMapFromModal()">Save Map</button>
             </div>
         </div>
     </div>
