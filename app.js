@@ -2448,8 +2448,8 @@ async function addMapFromFiles() {
         // optional SLAM pose graph files (enable "Autonomous + Map Update")
         const pg = document.getElementById('new-map-posegraph'), dt = document.getElementById('new-map-data');
         const pgF = pg && pg.files ? pg.files[0] : null, dtF = dt && dt.files ? dt.files[0] : null;
-        if (!!pgF !== !!dtF) throw new Error('Provide BOTH .posegraph and .data, or neither.');
-        if (pgF && dtF) {
+        if (!pgF || !dtF) throw new Error('Select both the .posegraph and .data files.');
+        {
             for (const [ext, f] of [['posegraph', pgF], ['data', dtF]]) {
                 r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/' + ext), {
                     method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' },
