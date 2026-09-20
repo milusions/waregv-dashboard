@@ -202,6 +202,9 @@ ros.on('connection', () => {
     if (rosState !== 'up') notify('INFO', 'Connected to rosbridge.');
     rosState = 'up';
     subscribeAll();
+    // REST map discovery is independent of rosbridge. Fetch here as well as
+    // during init so the dropdown is populated after the rover connection is ready.
+    fetchMaps({ notifyError: false });
 });
 ros.on('error', () => {
     statusEl.textContent = 'Connection Error';
@@ -1131,20 +1134,36 @@ async function sendAbort() {
 let availableMaps = [];
 let mapsLoading = false;
 
-async function fetchMaps() {
+async function fetchMaps(options = {}) {
     if (mapsLoading) return;
-    mapsLoading = true;
     const select = document.getElementById('map-name-select');
+    if (!select) return;
+
+    // The rover IP is entered in the connection dialog and stored in localStorage.
+    // Do not try to fetch before that value exists: otherwise the browser attempts
+    // to call http://:8000/maps during the very first page load.
+    if (!ROVER_HOST) {
+        select.disabled = true;
+        select.innerHTML = '<option value="">Connect to rover to load maps</option>';
+        return;
+    }
+
+    mapsLoading = true;
     try {
         const ctl = new AbortController();
         const to = setTimeout(() => ctl.abort(), 5000);
-        const r = await fetch("http://" + ROVER_HOST + ":8000/maps", { cache: 'no-store', signal: ctl.signal });
+        const r = await fetch('http://' + ROVER_HOST + ':8000/maps?t=' + Date.now(), {
+            cache: 'no-store',
+            signal: ctl.signal,
+            headers: { 'Accept': 'application/json' }
+        });
         clearTimeout(to);
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
-        availableMaps = Array.isArray(data.maps) ? data.maps : [];
 
-        if (!select) return;
+        const data = await r.json();
+        if (!Array.isArray(data.maps)) throw new Error('Invalid /maps response');
+        availableMaps = data.maps;
+
         const previous = select.value;
         select.innerHTML = '';
 
@@ -1160,16 +1179,23 @@ async function fetchMaps() {
                 opt.textContent = name;
                 select.appendChild(opt);
             });
-            if (availableMaps.includes(previous)) select.value = previous;
+            if (availableMaps.includes(previous)) {
+                select.value = previous;
+            } else {
+                select.selectedIndex = 0;
+            }
         }
+
         select.disabled = false;
         select.dataset.loaded = 'true';
+        updateMapButtons();
+        if (options.notifySuccess) notify('INFO', 'Loaded ' + availableMaps.length + ' saved map(s).');
     } catch (e) {
-        if (select) {
-            select.innerHTML = '<option value="">Unable to load maps</option>';
-            select.disabled = false;
+        select.innerHTML = '<option value="">Unable to load maps</option>';
+        select.disabled = false;
+        if (options.notifyError !== false) {
+            notify('WARNING', 'Could not fetch saved maps: ' + (e.name === 'AbortError' ? 'request timed out' : e.message));
         }
-        notify('WARNING', 'Could not fetch saved maps: ' + e.message);
     } finally {
         mapsLoading = false;
     }
@@ -1358,7 +1384,7 @@ joyPad.addEventListener('pointercancel', joyEnd);
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');
     renderMode();
-    fetchMaps();
+    if (ROVER_HOST) fetchMaps({ notifyError: false });
     pollMode().then(scheduleModePoll);
     requestAnimationFrame(frame);
 })();
@@ -1966,3 +1992,247 @@ function setLang(lang) {
     document.getElementById('btn-en').classList.toggle('active', !isHi);
     document.getElementById('btn-hi').classList.toggle('active', isHi);
 }
+// ==================== MAP MANAGEMENT ====================
+function mapApiUrl(path) {
+    return 'http://' + ROVER_HOST + ':8000' + path;
+}
+
+function updateMapButtons() {
+    const select = document.getElementById('map-name-select');
+    const name = select ? select.value.trim() : '';
+    const valid = !!name && availableMaps.includes(name);
+    const view = document.getElementById('view-map-btn');
+    const del = document.getElementById('delete-map-btn');
+    if (view) view.disabled = !valid;
+    if (del) del.disabled = !valid;
+}
+
+function openMapAddModal() {
+    if (!ROVER_HOST) return notify('WARNING', 'Connect to the rover before adding a map.');
+    const modal = document.getElementById('map-add-modal');
+    const name = document.getElementById('new-map-name');
+    const pgm = document.getElementById('new-map-pgm');
+    const yaml = document.getElementById('new-map-yaml');
+    const err = document.getElementById('map-add-error');
+    if (name) name.value = '';
+    if (pgm) pgm.value = '';
+    if (yaml) yaml.value = '';
+    if (err) err.textContent = '';
+    if (modal) modal.hidden = false;
+    setTimeout(() => name && name.focus(), 30);
+}
+
+function closeMapAddModal() {
+    const modal = document.getElementById('map-add-modal');
+    if (modal) modal.hidden = true;
+}
+
+function closeMapPreview() {
+    const modal = document.getElementById('map-preview-modal');
+    if (modal) modal.hidden = true;
+    const canvas = document.getElementById('map-preview-canvas');
+    if (canvas) { canvas.width = 1; canvas.height = 1; }
+}
+
+async function addMapFromFiles() {
+    const nameEl = document.getElementById('new-map-name');
+    const pgmEl = document.getElementById('new-map-pgm');
+    const yamlEl = document.getElementById('new-map-yaml');
+    const errEl = document.getElementById('map-add-error');
+    const submit = document.getElementById('add-map-submit');
+    const name = (nameEl ? nameEl.value : '').trim();
+    const pgm = pgmEl && pgmEl.files ? pgmEl.files[0] : null;
+    const yaml = yamlEl && yamlEl.files ? yamlEl.files[0] : null;
+
+    if (errEl) errEl.textContent = '';
+    if (!name) return setMapAddError('Enter a map name.');
+    if (!/^[A-Za-z0-9 _.-]+$/.test(name) || name === '.' || name === '..') {
+        return setMapAddError('Use only letters, numbers, spaces, _, -, and . in the map name.');
+    }
+    if (!pgm || !yaml) return setMapAddError('Select both a PGM file and a YAML file.');
+    if (!/\.pgm$/i.test(pgm.name)) return setMapAddError('The image file must be a .pgm file.');
+    if (!/\.ya?ml$/i.test(yaml.name)) return setMapAddError('The metadata file must be a .yaml or .yml file.');
+
+    if (submit) { submit.disabled = true; submit.classList.add('loading'); }
+    let created = false;
+    try {
+        let r = await fetch(mapApiUrl('/maps'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ map_name: name })
+        });
+        if (!r.ok) throw new Error(await responseError(r));
+        created = true;
+
+        r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/pgm'), {
+            method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' },
+            body: await pgm.arrayBuffer()
+        });
+        if (!r.ok) throw new Error(await responseError(r));
+
+        r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/yaml'), {
+            method: 'PUT', headers: { 'Content-Type': 'text/yaml; charset=utf-8' },
+            body: await yaml.text()
+        });
+        if (!r.ok) throw new Error(await responseError(r));
+
+        closeMapAddModal();
+        notify('INFO', 'Map "' + name + '" added successfully.');
+        await fetchMaps({ notifyError: true });
+        const select = document.getElementById('map-name-select');
+        if (select && availableMaps.includes(name)) select.value = name;
+        updateMapButtons();
+    } catch (e) {
+        if (created) {
+            try { await fetch(mapApiUrl('/maps/' + encodeURIComponent(name)), { method: 'DELETE' }); } catch (_) {}
+        }
+        setMapAddError(e.message || 'Failed to add map.');
+    } finally {
+        if (submit) { submit.disabled = false; submit.classList.remove('loading'); }
+    }
+}
+
+function setMapAddError(message) {
+    const el = document.getElementById('map-add-error');
+    if (el) el.textContent = message;
+}
+
+async function responseError(r) {
+    let message = 'HTTP ' + r.status;
+    try {
+        const data = await r.json();
+        if (data && data.detail) message = data.detail;
+    } catch (_) {}
+    return message;
+}
+
+async function deleteSelectedMap() {
+    const select = document.getElementById('map-name-select');
+    const name = select ? select.value.trim() : '';
+    if (!name || !availableMaps.includes(name)) return;
+    if (!window.confirm('Delete map "' + name + '" and all of its files? This cannot be undone.')) return;
+
+    const btn = document.getElementById('delete-map-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+    try {
+        const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name)), { method: 'DELETE' });
+        if (!r.ok) throw new Error(await responseError(r));
+        notify('INFO', 'Map "' + name + '" deleted.');
+        await fetchMaps({ notifyError: true });
+        updateMapButtons();
+    } catch (e) {
+        notify('ERROR', 'Failed to delete map: ' + e.message);
+        updateMapButtons();
+    } finally {
+        if (btn) btn.classList.remove('loading');
+    }
+}
+
+async function openSelectedMapPreview() {
+    const select = document.getElementById('map-name-select');
+    const name = select ? select.value.trim() : '';
+    if (!name || !availableMaps.includes(name)) return;
+
+    const modal = document.getElementById('map-preview-modal');
+    const title = document.getElementById('map-preview-title');
+    const meta = document.getElementById('map-preview-meta');
+    const loading = document.getElementById('map-preview-loading');
+    const error = document.getElementById('map-preview-error');
+    const canvas = document.getElementById('map-preview-canvas');
+    if (!modal || !canvas) return;
+
+    title.textContent = name;
+    meta.textContent = 'PGM occupancy image — loading…';
+    error.textContent = '';
+    loading.hidden = false;
+    canvas.hidden = true;
+    modal.hidden = false;
+
+    try {
+        const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/pgm?t=' + Date.now()), { cache: 'no-store' });
+        if (!r.ok) throw new Error(await responseError(r));
+        const buffer = await r.arrayBuffer();
+        const info = renderPgmToCanvas(buffer, canvas);
+        loading.hidden = true;
+        canvas.hidden = false;
+        meta.textContent = info.width + ' × ' + info.height + ' px · PGM ' + info.magic;
+    } catch (e) {
+        loading.hidden = true;
+        error.textContent = 'Could not load PGM: ' + e.message;
+    }
+}
+
+function renderPgmToCanvas(buffer, canvas) {
+    const bytes = new Uint8Array(buffer);
+    let pos = 0;
+
+    function nextToken() {
+        while (pos < bytes.length) {
+            const c = bytes[pos];
+            if (c === 35) { // # comment
+                while (pos < bytes.length && bytes[pos] !== 10 && bytes[pos] !== 13) pos++;
+            } else if (c <= 32) {
+                pos++;
+            } else break;
+        }
+        const start = pos;
+        while (pos < bytes.length && bytes[pos] > 32 && bytes[pos] !== 35) pos++;
+        return new TextDecoder().decode(bytes.subarray(start, pos));
+    }
+
+    const magic = nextToken();
+    if (magic !== 'P2' && magic !== 'P5') throw new Error('Unsupported PGM format ' + magic);
+    const width = Number(nextToken()), height = Number(nextToken()), maxval = Number(nextToken());
+    if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(maxval) || width <= 0 || height <= 0 || maxval <= 0 || maxval > 65535) {
+        throw new Error('Invalid PGM header');
+    }
+
+    const count = width * height;
+    const pixels = new Uint8ClampedArray(count);
+    if (magic === 'P2') {
+        for (let i = 0; i < count; i++) {
+            const v = Number(nextToken());
+            if (!Number.isFinite(v)) throw new Error('PGM pixel data is incomplete');
+            pixels[i] = Math.max(0, Math.min(255, Math.round(v * 255 / maxval)));
+        }
+    } else {
+        // P5 pixel data begins after one whitespace character following maxval.
+        while (pos < bytes.length && bytes[pos] <= 32) pos++;
+        if (maxval <= 255) {
+            if (bytes.length - pos < count) throw new Error('PGM pixel data is incomplete');
+            for (let i = 0; i < count; i++) pixels[i] = Math.round(bytes[pos + i] * 255 / maxval);
+        } else {
+            if (bytes.length - pos < count * 2) throw new Error('PGM pixel data is incomplete');
+            for (let i = 0; i < count; i++) {
+                const v = (bytes[pos + i * 2] << 8) | bytes[pos + i * 2 + 1];
+                pixels[i] = Math.round(v * 255 / maxval);
+            }
+        }
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const image = ctx.createImageData(width, height);
+    for (let i = 0, j = 0; i < count; i++, j += 4) {
+        const v = pixels[i];
+        image.data[j] = v; image.data[j + 1] = v; image.data[j + 2] = v; image.data[j + 3] = 255;
+    }
+    ctx.putImageData(image, 0, 0);
+    return { width, height, magic };
+}
+
+window.openMapAddModal = openMapAddModal;
+window.closeMapAddModal = closeMapAddModal;
+window.addMapFromFiles = addMapFromFiles;
+window.openSelectedMapPreview = openSelectedMapPreview;
+window.closeMapPreview = closeMapPreview;
+window.deleteSelectedMap = deleteSelectedMap;
+window.updateMapButtons = updateMapButtons;
+
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const add = document.getElementById('map-add-modal');
+    const preview = document.getElementById('map-preview-modal');
+    if (add && !add.hidden) closeMapAddModal();
+    if (preview && !preview.hidden) closeMapPreview();
+});

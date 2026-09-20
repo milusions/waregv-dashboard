@@ -326,9 +326,14 @@
                                     <option value="nav">Autonomous Driving (Fixed Map)</option>
                                 </select>
                                 <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
-                                <select id="map-name-select" class="field" disabled>
+                                <select id="map-name-select" class="field" disabled onchange="updateMapButtons()">
                                     <option value="">Loading maps…</option>
                                 </select>
+                                <div class="map-manage-row">
+                                    <button class="btn btn-secondary" type="button" onclick="openMapAddModal()">Add Map</button>
+                                    <button class="btn btn-secondary" id="view-map-btn" type="button" onclick="openSelectedMapPreview()" disabled>View PGM</button>
+                                    <button class="btn btn-danger" id="delete-map-btn" type="button" onclick="deleteSelectedMap()" disabled>Delete</button>
+                                </div>
                                 <div class="btn-row">
                                     <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
                                     <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
@@ -402,6 +407,48 @@
     </div>
 
     <div id="notify-stack"></div>
+
+    <div id="map-add-modal" class="map-manager-modal" hidden>
+        <div class="map-manager-card" role="dialog" aria-modal="true" aria-labelledby="map-add-title">
+            <div class="map-manager-head">
+                <div>
+                    <div id="map-add-title" class="map-manager-title">Add Map</div>
+                    <div class="map-manager-sub">Upload a PGM occupancy image and its Nav2 YAML.</div>
+                </div>
+                <button class="map-manager-close" type="button" onclick="closeMapAddModal()">&times;</button>
+            </div>
+            <div class="map-manager-body">
+                <label class="map-manager-label">Map name</label>
+                <input id="new-map-name" class="field" type="text" placeholder="e.g. warehouse_new" autocomplete="off">
+                <label class="map-manager-label">PGM file</label>
+                <input id="new-map-pgm" class="map-file-input" type="file" accept=".pgm,image/x-portable-graymap">
+                <label class="map-manager-label">YAML file</label>
+                <input id="new-map-yaml" class="map-file-input" type="file" accept=".yaml,.yml,text/yaml">
+                <div id="map-add-error" class="map-manager-error"></div>
+            </div>
+            <div class="map-manager-foot">
+                <button class="btn btn-secondary" type="button" onclick="closeMapAddModal()">Cancel</button>
+                <button class="btn btn-primary" id="add-map-submit" type="button" onclick="addMapFromFiles()">Add Map</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="map-preview-modal" class="map-manager-modal" hidden>
+        <div class="map-preview-card" role="dialog" aria-modal="true" aria-labelledby="map-preview-title">
+            <div class="map-manager-head">
+                <div>
+                    <div id="map-preview-title" class="map-manager-title">Map Preview</div>
+                    <div id="map-preview-meta" class="map-manager-sub">PGM occupancy image</div>
+                </div>
+                <button class="map-manager-close" type="button" onclick="closeMapPreview()">&times;</button>
+            </div>
+            <div class="map-preview-body">
+                <div id="map-preview-loading" class="map-preview-loading">Loading PGM…</div>
+                <canvas id="map-preview-canvas"></canvas>
+                <div id="map-preview-error" class="map-manager-error"></div>
+            </div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
     <script>
