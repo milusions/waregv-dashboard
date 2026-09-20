@@ -2380,6 +2380,7 @@ function openMapAddModal() {
     if (!ROVER_HOST) return notify('WARNING', 'Connect to the rover before adding a map.');
     const modal = document.getElementById('map-add-modal');
     const name = document.getElementById('new-map-name');
+    ['new-map-posegraph','new-map-data'].forEach(function (i) { const e = document.getElementById(i); if (e) e.value = ''; });
     const pgm = document.getElementById('new-map-pgm');
     const yaml = document.getElementById('new-map-yaml');
     const err = document.getElementById('map-add-error');
@@ -2443,6 +2444,20 @@ async function addMapFromFiles() {
             body: await yaml.text()
         });
         if (!r.ok) throw new Error(await responseError(r));
+
+        // optional SLAM pose graph files (enable "Autonomous + Map Update")
+        const pg = document.getElementById('new-map-posegraph'), dt = document.getElementById('new-map-data');
+        const pgF = pg && pg.files ? pg.files[0] : null, dtF = dt && dt.files ? dt.files[0] : null;
+        if (!!pgF !== !!dtF) throw new Error('Provide BOTH .posegraph and .data, or neither.');
+        if (pgF && dtF) {
+            for (const [ext, f] of [['posegraph', pgF], ['data', dtF]]) {
+                r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/' + ext), {
+                    method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' },
+                    body: await f.arrayBuffer()
+                });
+                if (!r.ok) throw new Error(await responseError(r));
+            }
+        }
 
         closeMapAddModal();
         notify('INFO', 'Map "' + name + '" added successfully.');
