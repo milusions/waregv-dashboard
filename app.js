@@ -1151,7 +1151,7 @@ document.addEventListener('pointerdown', (evt) => {
 
 mapWrap.addEventListener('contextmenu', e => e.preventDefault());
 mapWrap.addEventListener('pointerdown', (evt) => {
-    if (evt.target.closest('#map-pose-popup')) return;
+    if (evt.target.closest('#map-pose-popup, #layer-legend')) return;
     mapWrap.setPointerCapture(evt.pointerId);
     const [sx, sy] = evtPos(evt);
     if (evt.button === 1 || evt.button === 2 || evt.shiftKey) {
@@ -1202,6 +1202,7 @@ document.addEventListener('keydown', (evt) => {
 });
 mapWrap.addEventListener('pointercancel', () => { panState = null; activeGoal = null; needsDraw = true; });
 mapWrap.addEventListener('wheel', (evt) => {
+    if (evt.target.closest('#layer-legend')) return;
     evt.preventDefault();
     const [sx, sy] = evtPos(evt), { W, H } = mapSize();
     const w = s2w(sx, sy);
@@ -2627,18 +2628,29 @@ document.addEventListener('keydown', e => {
 });
 
 
-// ---- vertical resize of the wheel-graph group (drag the bar above the graphs) ----
+
+// Keep legend interactions from reaching the map (no pose popup / pan / goal on click)
 (function () {
-    const bar = document.getElementById('graphs-resizer'); if (!bar) return;
-    const root = document.documentElement;
-    let startY = 0, startH = 0;
-    const curH = () => parseFloat(getComputedStyle(bar.parentElement).height) || 200;
-    const setH = (h) => root.style.setProperty('--graphs-h', Math.max(120, Math.min(h, window.innerHeight * 0.7)) + 'px');
-    bar.addEventListener('pointerdown', (e) => {
-        startY = e.clientY; startH = curH(); bar.classList.add('drag'); bar.setPointerCapture(e.pointerId); e.preventDefault();
+    const lg = document.getElementById('layer-legend'); if (!lg) return;
+    ['pointerup', 'pointermove', 'click', 'contextmenu'].forEach(t => lg.addEventListener(t, e => e.stopPropagation()));
+})();
+
+// ---- per-graph fullscreen (button in each wheel graph header, Esc to close) ----
+(function () {
+    let full = null;
+    function setFull(panel) {
+        if (full) { full.classList.remove('chart-full'); full.querySelector('.chart-full-btn').textContent = '⛶'; }
+        full = (panel && panel !== full) ? panel : null;
+        if (full) { full.classList.add('chart-full'); full.querySelector('.chart-full-btn').textContent = '✕'; }
+    }
+    wheelIds.forEach(id => {
+        const cv = document.getElementById('chart-' + id); if (!cv) return;
+        const panel = cv.closest('.panel'), hd = panel.querySelector('.panel-hd');
+        const b = document.createElement('button');
+        b.className = 'chart-full-btn'; b.textContent = '⛶'; b.title = 'Full screen (Esc to close)';
+        b.addEventListener('click', () => setFull(panel));
+        hd.appendChild(b);
+        hd.addEventListener('dblclick', () => setFull(panel));
     });
-    bar.addEventListener('pointermove', (e) => { if (bar.classList.contains('drag')) { setH(startH + (startY - e.clientY)); needsDraw = true; } });
-    const end = () => bar.classList.remove('drag');
-    bar.addEventListener('pointerup', end); bar.addEventListener('pointercancel', end);
-    bar.addEventListener('dblclick', () => { root.style.removeProperty('--graphs-h'); needsDraw = true; });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && full) setFull(null); });
 })();
