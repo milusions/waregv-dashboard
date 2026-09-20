@@ -186,6 +186,7 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 }
 .tool-btn:hover { color: var(--text); border-color: var(--muted); }
 .tool-btn.on { color: var(--primary); border-color: var(--primary); }
+.scan-legend { position:absolute; right:8px; bottom:8px; pointer-events:none; font-size:0.66rem; color:var(--primary); background:var(--panel); border:1px solid var(--border); border-radius:4px; padding:3px 7px; opacity:.92; }
 
 /* ----- Map pose action popup ----- */
 .map-pose-popup {

@@ -12,11 +12,14 @@ const CFG = {
         cmd: '/velocity_controller/commands',
         cmdVel: '/cmd_vel',
         joy: '/joy',
-        camera: '/camera/image_raw'
+        camera: '/camera/image_raw',
+        scan: '/scan'
     },
     mapFrame: 'map',
     baseFrames: ['base_link', 'base_footprint'],
     cmdOrder: ['fl', 'fr', 'bl', 'br'],
+    // /joint_states velocity order: FR, FL, RR, RL
+    jointOrder: ['fr', 'fl', 'br', 'bl'],
     jointOverrides: {},
     modeUrl: '/system/mode',
     modeTimeoutMs: 40000,
@@ -98,6 +101,8 @@ const mapCanvasOff = document.createElement('canvas');
 const tfTree = {};
 let odom = null;
 let robot = null;
+let latestScan = null;
+let showLaserScan = true;
 let currentCmdVel = { linear: 0, angular: 0 };
 
 let activeNavBtn = null;
@@ -294,6 +299,19 @@ function subscribeAll() {
 
     mk(T.joint, 'sensor_msgs/JointState', onJointState);
 
+    mk(T.scan, 'sensor_msgs/LaserScan', (m) => {
+        latestScan = {
+            frame: strip(m.header && m.header.frame_id),
+            stamp: m.header && m.header.stamp ? m.header.stamp : null,
+            angleMin: Number(m.angle_min) || 0,
+            angleInc: Number(m.angle_increment) || 0,
+            rangeMin: Number(m.range_min) || 0,
+            rangeMax: Number(m.range_max) || 0,
+            ranges: Array.isArray(m.ranges) ? m.ranges.slice() : []
+        };
+        needsDraw = true;
+    });
+
     const cam = new ROSLIB.Topic({ ros, name: T.camera, messageType: 'sensor_msgs/Image', throttle_rate: 100, queue_length: 1 });
     cam.subscribe(onCameraImage); subs.push(cam);
 
@@ -303,6 +321,68 @@ function subscribeAll() {
     }, () => notify('WARNING', 'Command topic ' + T.cmd + ' not found; wheel command traces will be empty.'));
 
     joyTopic = new ROSLIB.Topic({ ros, name: T.joy, messageType: 'sensor_msgs/Joy' });
+}
+
+function resolveFramePose(frame) {
+    frame = strip(frame);
+    if (!frame) return null;
+    if (frame === CFG.mapFrame) return { x: 0, y: 0, yaw: 0 };
+
+    let cur = frame;
+    let acc = { x: 0, y: 0, yaw: 0 };
+    let depth = 0;
+    while (cur !== CFG.mapFrame && depth++ < 20) {
+        const t = tfTree[cur];
+        if (!t) return null;
+        const c = Math.cos(t.yaw), ss = Math.sin(t.yaw);
+        acc = {
+            x: t.x + c * acc.x - ss * acc.y,
+            y: t.y + ss * acc.x + c * acc.y,
+            yaw: t.yaw + acc.yaw
+        };
+        cur = t.parent;
+    }
+    return cur === CFG.mapFrame ? acc : null;
+}
+
+function drawLaserScan(ctx) {
+    if (!showLaserScan || !latestScan || !latestScan.ranges.length) return;
+
+    const scan = latestScan;
+    const pose = resolveFramePose(scan.frame) || robot;
+    if (!pose) return;
+
+    const framePose = resolveFramePose(scan.frame);
+    const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+    const step = Math.max(1, Math.ceil(scan.ranges.length / 1800));
+
+    ctx.save();
+    ctx.fillStyle = theme['--primary'];
+    ctx.globalAlpha = 0.72;
+
+    for (let i = 0; i < scan.ranges.length; i += step) {
+        const r = Number(scan.ranges[i]);
+        if (!Number.isFinite(r) || r < scan.rangeMin || r > scan.rangeMax) continue;
+
+        const a = scan.angleMin + i * scan.angleInc;
+        let lx = r * Math.cos(a), ly = r * Math.sin(a);
+
+        // Transform laser-frame coordinates into map coordinates when TF is available.
+        if (framePose) {
+            const fc = Math.cos(framePose.yaw), fs = Math.sin(framePose.yaw);
+            const mx = framePose.x + fc * lx - fs * ly;
+            const my = framePose.y + fs * lx + fc * ly;
+            const p = w2s(mx, my);
+            ctx.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 2);
+        } else {
+            // Fallback: treat the scan frame as coincident with the rover base.
+            const mx = pose.x + c * lx - s * ly;
+            const my = pose.y + s * lx + c * ly;
+            const p = w2s(mx, my);
+            ctx.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 2);
+        }
+    }
+    ctx.restore();
 }
 
 function resolveRobotPose() {
@@ -348,10 +428,12 @@ function pushPoint(arr, v) {
     while (arr.length && arr[0].t < cutoff) arr.shift();
 }
 function onJointState(m) {
-    if (!m.velocity || !m.name) return;
-    m.name.forEach((n, i) => {
-        const id = classifyJoint(n);
-        if (id && typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i] * RAD_S_TO_RPM);
+    if (!m.velocity) return;
+    // The rover publishes /joint_states velocities in this fixed order:
+    // [FR, FL, RR, RL].  Do not use the joint-name order here because the
+    // controller's JointState array is intentionally ordered differently.
+    CFG.jointOrder.forEach((id, i) => {
+        if (typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i] * RAD_S_TO_RPM);
     });
 }
 function onCommand(m) {
@@ -509,6 +591,15 @@ function fitMapView() {
 function toggleFollow() {
     follow = !follow;
     document.getElementById('follow-btn').classList.toggle('on', follow);
+    needsDraw = true;
+}
+function toggleLaserScan() {
+    showLaserScan = !showLaserScan;
+    const btn = document.getElementById('scan-btn');
+    if (btn) {
+        btn.classList.toggle('on', showLaserScan);
+        btn.textContent = showLaserScan ? 'Scan On' : 'Scan Off';
+    }
     needsDraw = true;
 }
 
@@ -755,6 +846,8 @@ function drawMap() {
         const sx = Math.round(w2s(0, y)[0]) + 0.5; ctx.moveTo(sx, 0); ctx.lineTo(sx, H);
     }
     ctx.stroke();
+
+    drawLaserScan(ctx);
 
     const o = w2s(0, 0), ax = w2s(1, 0), ay = w2s(0, 1);
     ctx.lineWidth = 2;
