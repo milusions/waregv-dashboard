@@ -2397,6 +2397,32 @@ function updateMapButtons() {
     const del = document.getElementById('delete-map-btn');
     if (view) view.disabled = !valid;
     if (del) del.disabled = !valid;
+    const dl = ensureMapDownloadBtn();
+    if (dl) dl.disabled = !valid;
+}
+
+function ensureMapDownloadBtn() {
+    let b = document.getElementById('download-map-btn');
+    if (b) return b;
+    const del = document.getElementById('delete-map-btn');
+    if (!del) return null;
+    b = document.createElement('button');
+    b.className = 'btn btn-secondary'; b.id = 'download-map-btn'; b.type = 'button';
+    b.textContent = 'Download ZIP'; b.title = 'Download the selected map as a .zip';
+    b.onclick = downloadSelectedMap;
+    del.parentElement.insertBefore(b, del);
+    return b;
+}
+
+function downloadSelectedMap() {
+    const select = document.getElementById('map-name-select');
+    const name = select ? select.value.trim() : '';
+    if (!name || !availableMaps.includes(name)) return notify('WARNING', 'Select a saved map first.');
+    const a = document.createElement('a');
+    a.href = mapApiUrl('/maps/' + encodeURIComponent(name) + '/zip');
+    a.download = name + '.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    notify('INFO', 'Downloading ' + name + '.zip…');
 }
 
 function openMapAddModal() {
@@ -2667,3 +2693,5 @@ document.addEventListener('keydown', e => {
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && full) setFull(null); });
 })();
+
+ensureMapDownloadBtn();
