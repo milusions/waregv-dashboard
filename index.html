@@ -122,17 +122,16 @@
                 <span class="thinking-spinner" aria-hidden="true"></span>
                 <span id="thinking-stage-text">Analyzing prompt</span>
             </div>
-            <div id="agent-live-status" class="agent-live-status" aria-live="polite">
-                <div class="agent-live-status-head">
-                    <span>LIVE AGENT STATUS</span><span id="agent-connection-state">Offline</span>
-                </div>
-                <div id="agent-event-list" class="agent-event-list"></div>
-            </div>
-
             <div class="caption-container">
                 <div class="caption-header-row">
                     <div id="caption-status" class="caption-status">Listening</div>
                     <button id="stop-talking-btn" class="stop-talking-btn" onclick="stopTalking()" title="Stop announcer">Stop Talking</button>
+                </div>
+                <div id="agent-live-status" class="agent-live-status" aria-live="polite">
+                    <div class="agent-live-status-head">
+                        <span>LIVE AGENT</span><span id="agent-connection-state">Offline</span>
+                    </div>
+                    <div id="agent-event-list" class="agent-event-list" aria-hidden="true"></div>
                 </div>
                 <div id="caption-text" class="caption-text md-viewer">Speak now...</div>
             </div>
@@ -391,16 +390,16 @@
 
             <!-- Wheel graphs -->
             <div class="graphs">
-                <section class="panel"><div class="panel-hd"><span>Front Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Front Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fl-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-fl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Front Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Front Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fr-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fr-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-fr"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-bl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-bl-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-bl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-br-a">—</b></span><span class="b"><i></i>cmd<b id="lg-br-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-br"></canvas></div></section>
             </div>

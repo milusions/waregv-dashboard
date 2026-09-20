@@ -16,7 +16,7 @@ const CFG = {
     },
     mapFrame: 'map',
     baseFrames: ['base_link', 'base_footprint'],
-    cmdOrder: ['fr', 'br', 'fl', 'bl'],
+    cmdOrder: ['fl', 'fr', 'bl', 'br'],
     jointOverrides: {},
     modeUrl: '/system/mode',
     modeTimeoutMs: 40000,
@@ -160,6 +160,9 @@ function startNavWatchdog() {
 }
 
 const wheelIds = ['fl', 'fr', 'bl', 'br'];
+const MAX_WHEEL_RAD_S = 20;
+const RAD_S_TO_RPM = 60 / (2 * Math.PI);
+const MAX_WHEEL_RPM = MAX_WHEEL_RAD_S * RAD_S_TO_RPM;
 const series = {};
 wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
@@ -348,12 +351,12 @@ function onJointState(m) {
     if (!m.velocity || !m.name) return;
     m.name.forEach((n, i) => {
         const id = classifyJoint(n);
-        if (id && typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i]);
+        if (id && typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i] * RAD_S_TO_RPM);
     });
 }
 function onCommand(m) {
     if (!m.data) return;
-    CFG.cmdOrder.forEach((id, i) => { if (typeof m.data[i] === 'number') pushPoint(series[id].c, m.data[i]); });
+    CFG.cmdOrder.forEach((id, i) => { if (typeof m.data[i] === 'number') pushPoint(series[id].c, m.data[i] * RAD_S_TO_RPM); });
 }
 
 const camCanvas = document.getElementById('cam-canvas');
@@ -411,12 +414,11 @@ function drawChart(id) {
     const pw = w - L - R, ph = h - T - B;
     const A = series[id].a.filter(p => p.t >= t0 - 1), C = series[id].c;
 
-    let lo = Infinity, hi = -Infinity;
-    const scan = p => { if (p.t >= t0 - 1) { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); } };
-    A.forEach(scan); C.forEach(scan);
-    if (!isFinite(lo)) { lo = -1; hi = 1; }
-    if (hi - lo < 0.2) { const mid = (hi + lo) / 2; lo = mid - 0.1; hi = mid + 0.1; }
-    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+    // Fixed wheel-speed scale: ±20 rad/s converted to RPM.
+    // The scale never changes with the incoming data, so all four graphs
+    // remain directly comparable.
+    const lo = -MAX_WHEEL_RPM;
+    const hi = MAX_WHEEL_RPM;
 
     const X = t => L + ((t - t0) / win) * pw;
     const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
@@ -428,8 +430,14 @@ function drawChart(id) {
     for (let i = 0; i <= 4; i++) {
         const v = lo + (hi - lo) * (i / 4), y = Math.round(Y(v)) + 0.5;
         ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
-        ctx.fillText(v.toFixed(2), L - 6, y);
+        ctx.fillText(v.toFixed(0), L - 6, y);
     }
+    ctx.save();
+    ctx.translate(11, T + ph / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('RPM', 0, 0);
+    ctx.restore();
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (let s = 0; s <= win; s += 10) {
         const x = Math.round(X(t0 + s)) + 0.5;
@@ -600,82 +608,113 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
-// Fictional "thinking" path: robot -> waypoints... -> target, drawn progressively and looped
-// until Nav2 publishes the real plan.
+// Simple straight-line planning loader shown while Nav2 is calculating.
+// Uses direct segments between the robot and requested targets; no artificial wobble.
 function drawPlanAnim(ctx, now) {
     if (!planAnim) return;
-    const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets) : planAnim.targets;
+    const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets || []) : (planAnim.targets || []);
     if (nodesW.length < 2) return;
 
-    const el = now - planAnim.t0;
-    const p = el % (PLAN_DRAW_MS + PLAN_HOLD_MS + PLAN_FADE_MS);
-    let prog = 1, alpha = 1;
-    if (p < PLAN_DRAW_MS) { const u = p / PLAN_DRAW_MS; prog = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; }
-    else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) alpha = 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS;
-
-    // Wobbling polyline in screen space (wobble is 0 at every node, so it passes exactly through them)
     const S = nodesW.map(n => w2s(n.x, n.y));
-    const pts = [S[0]], nodeIdx = [0], phase = el / 260;
+    const segments = [];
+    let total = 0;
     for (let i = 0; i < S.length - 1; i++) {
-        const a = S[i], b = S[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
-        if (len < 1) { pts.push(b); nodeIdx.push(pts.length - 1); continue; }
-        const nx = -dy / len, ny = dx / len;
-        const n = Math.max(6, Math.ceil(len / 8));
-        const amp = Math.min(16, len * 0.14);
-        const waves = Math.max(1, Math.round(len / 110));
-        for (let k = 1; k <= n; k++) {
-            const t = k / n;
-            const off = amp * Math.sin(Math.PI * t) * Math.sin(2 * Math.PI * waves * t + phase + i * 1.7);
-            pts.push([a[0] + dx * t + nx * off, a[1] + dy * t + ny * off]);
-        }
-        nodeIdx.push(pts.length - 1);
+        const a = S[i], b = S[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (len < 0.5) continue;
+        segments.push({ a, b, len, start: total });
+        total += len;
     }
-    const cum = [0];
-    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-    const total = cum[cum.length - 1];
     if (total < 1) return;
-    const headLen = prog * total;
+
+    const el = now - planAnim.t0;
+    const cycle = PLAN_DRAW_MS + PLAN_HOLD_MS + PLAN_FADE_MS;
+    const p = el % cycle;
+    let progress = 1;
+    let alpha = 1;
+
+    if (p < PLAN_DRAW_MS) {
+        const u = p / PLAN_DRAW_MS;
+        progress = u * u * (3 - 2 * u); // smoothstep
+    } else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) {
+        alpha = Math.max(0, 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS);
+    }
+
     const col = theme['--primary'];
+    const headDist = progress * total;
 
     ctx.save();
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
-    // faint ghost of the whole route
-    ctx.globalAlpha = 0.18 * alpha; ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
-    ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
+    // Very subtle full route preview.
+    ctx.globalAlpha = 0.16 * alpha;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 7]);
+    ctx.beginPath();
+    segments.forEach((seg, i) => {
+        if (i === 0) ctx.moveTo(seg.a[0], seg.a[1]);
+        ctx.lineTo(seg.b[0], seg.b[1]);
+    });
+    ctx.stroke();
     ctx.setLineDash([]);
 
-    // drawn trail with a fading tail
-    ctx.lineWidth = 3.5; ctx.strokeStyle = col;
-    let head = pts[0];
-    for (let i = 1; i < pts.length && cum[i - 1] < headLen; i++) {
-        let x = pts[i][0], y = pts[i][1];
-        if (cum[i] > headLen) {
-            const t = (headLen - cum[i - 1]) / (cum[i] - cum[i - 1]);
-            x = pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t;
-            y = pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t;
+    // Clean, straight progress line.
+    ctx.globalAlpha = 0.95 * alpha;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    let started = false;
+    for (const seg of segments) {
+        if (headDist <= seg.start) break;
+        const travelled = Math.min(headDist - seg.start, seg.len);
+        const t = travelled / seg.len;
+        const x = seg.a[0] + (seg.b[0] - seg.a[0]) * t;
+        const y = seg.a[1] + (seg.b[1] - seg.a[1]) * t;
+        if (!started) {
+            ctx.moveTo(seg.a[0], seg.a[1]);
+            started = true;
         }
-        ctx.globalAlpha = alpha * Math.max(0.25, 1 - (headLen - cum[i - 1]) / 260);
-        ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(x, y); ctx.stroke();
-        head = [x, y];
+        ctx.lineTo(x, y);
+        if (travelled < seg.len) break;
+    }
+    if (started) ctx.stroke();
+
+    // Small moving indicator at the planning head.
+    let head = S[0];
+    for (const seg of segments) {
+        if (headDist <= seg.start + seg.len) {
+            const t = Math.max(0, Math.min(1, (headDist - seg.start) / seg.len));
+            head = [
+                seg.a[0] + (seg.b[0] - seg.a[0]) * t,
+                seg.a[1] + (seg.b[1] - seg.a[1]) * t
+            ];
+            break;
+        }
     }
 
-    // rippling markers on every waypoint / target the head has passed
-    for (let j = 1; j < nodeIdx.length; j++) {
-        if (cum[nodeIdx[j]] > headLen + 0.5) continue;
-        const q = pts[nodeIdx[j]], f = ((el / 900) + j * 0.3) % 1;
-        ctx.globalAlpha = alpha * (1 - f) * 0.7; ctx.lineWidth = 2; ctx.strokeStyle = col;
-        ctx.beginPath(); ctx.arc(q[0], q[1], 6 + f * 14, 0, 7); ctx.stroke();
-        ctx.globalAlpha = alpha; ctx.fillStyle = col;
-        ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill();
-    }
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(head[0], head[1], 4, 0, Math.PI * 2);
+    ctx.fill();
 
-    // glowing head
-    if (prog < 1) {
-        ctx.globalAlpha = alpha * 0.3; ctx.fillStyle = col;
-        ctx.beginPath(); ctx.arc(head[0], head[1], 10, 0, 7); ctx.fill();
-        ctx.globalAlpha = alpha; ctx.fillStyle = '#fff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(head[0], head[1], 4.5, 0, 7); ctx.fill(); ctx.stroke();
+    // Small endpoint markers, kept intentionally minimal.
+    for (let i = 1; i < S.length; i++) {
+        let distanceToNode = 0;
+        for (const seg of segments) {
+            if (Math.abs(seg.b[0] - S[i][0]) < 0.5 && Math.abs(seg.b[1] - S[i][1]) < 0.5) {
+                distanceToNode = seg.start + seg.len;
+                break;
+            }
+        }
+        if (distanceToNode <= headDist + 0.5) {
+            ctx.globalAlpha = 0.8 * alpha;
+            ctx.beginPath();
+            ctx.arc(S[i][0], S[i][1], 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
     }
     ctx.restore();
 }
@@ -1658,13 +1697,21 @@ function connectHelioWebSocket() {
 function handleHelioSocketEvent(data) {
     if (data.conversation_id) helioConversationId = data.conversation_id;
     switch (data.type) {
-        case 'session': appendAgentEvent('status', 'Conversation started.', data.conversation_id); break;
-        case 'status': appendAgentEvent(data.stage || 'status', data.message || ''); if (data.stage === 'thinking') setRobotMood('thinking', 'Thinking', data.message || 'Processing…'); else if (data.stage === 'tool_running') setRobotMood('thinking', 'Using tool', data.message || 'Accessing rover…'); break;
-        case 'model': appendAgentEvent('model', data.message || ''); break;
-        case 'tool_call': appendAgentEvent('tool-call', `${data.tool || 'tool'}()`, data.inputs || {}); setRobotMood('thinking', 'Using tool', `Calling ${data.tool || 'tool'}…`); break;
-        case 'tool_result': appendAgentEvent('tool-result', `${data.tool || 'tool'} completed`, data.result); break;
-        case 'final': { stopThinkingIndicator(); const finalText = data.output || "I didn't receive a valid response."; appendHistory('agent', finalText); speakAndLoop(finalText); break; }
-        case 'error': stopThinkingIndicator(); appendAgentEvent('error', data.message || 'Unknown Helio error.'); setRobotMood('listening', 'Ready', data.message || 'I ran into a problem.'); break;
+        case 'session': setAgentConnectionState(true, 'Ready'); appendAgentEvent('status', 'Conversation started.', data.conversation_id); break;
+        case 'status': {
+            const stage = String(data.stage || 'status').toLowerCase();
+            const liveLabel = stage === 'thinking' ? 'Thinking' : stage === 'tool_running' ? 'Using tool' : stage === 'listening' ? 'Listening' : stage === 'speaking' ? 'Speaking' : 'Working';
+            setAgentConnectionState(true, liveLabel);
+            appendAgentEvent(data.stage || 'status', data.message || '');
+            if (data.stage === 'thinking') setRobotMood('thinking', 'Thinking', data.message || 'Processing…');
+            else if (data.stage === 'tool_running') setRobotMood('thinking', 'Using tool', data.message || 'Accessing rover…');
+            break;
+        }
+        case 'model': setAgentConnectionState(true, data.message || 'Helio'); appendAgentEvent('model', data.message || ''); break;
+        case 'tool_call': setAgentConnectionState(true, 'Using tool'); appendAgentEvent('tool-call', `${data.tool || 'tool'}()`, data.inputs || {}); setRobotMood('thinking', 'Using tool', `Calling ${data.tool || 'tool'}…`); break;
+        case 'tool_result': setAgentConnectionState(true, 'Working'); appendAgentEvent('tool-result', `${data.tool || 'tool'} completed`, data.result); break;
+        case 'final': { setAgentConnectionState(true, 'Speaking'); stopThinkingIndicator(); const finalText = data.output || "I didn't receive a valid response."; appendHistory('agent', finalText); speakAndLoop(finalText); break; }
+        case 'error': stopThinkingIndicator(); setAgentConnectionState(true, 'Ready'); appendAgentEvent('error', data.message || 'Unknown Helio error.'); setRobotMood('listening', 'Ready', data.message || 'I ran into a problem.'); break;
     }
 }
 function closeHelioWebSocket() { helioSocketClosing = true; if (helioSocket) { try { helioSocket.close(1000, 'Helio closed by user'); } catch(e) {} } helioSocket = null; helioSocketPromise = null; helioConversationId = null; setAgentConnectionState(false, 'Offline'); }
@@ -1717,7 +1764,7 @@ if (SpeechRecognitionImpl) {
 
     recognition.onstart = () => {
         agentState = 'listening'; committed = false; heardSpeech = false; lastText = '';
-        listenStartedAt = Date.now(); listenDeadline = 0; setRobotMood('listening', 'Listening', 'Speak your command...'); playListenSound(); clearListenTimers();
+        listenStartedAt = Date.now(); listenDeadline = 0; setRobotMood('listening', 'Listening', 'Speak your command...'); setAgentConnectionState(true, 'Listening'); playListenSound(); clearListenTimers();
     };
 
     recognition.onerror = (e) => {
@@ -1770,7 +1817,15 @@ if (SpeechRecognitionImpl) {
 
 function setRobotMood(className, statusMsg, captionMsg) {
     robotFace.className = 'robot-face ' + className;
-    if (statusMsg !== null) captionStatus.textContent = statusMsg;
+    if (statusMsg !== null) {
+        captionStatus.textContent = statusMsg;
+        const live = document.getElementById('agent-connection-state');
+        if (live && modal && modal.classList.contains('active')) {
+            const compact = statusMsg === 'Helio' || statusMsg === 'Response' || statusMsg === 'Ready' ? statusMsg : statusMsg;
+            live.textContent = compact;
+            live.classList.add('connected');
+        }
+    }
     if (captionMsg !== null) {
         captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
     }
@@ -1835,6 +1890,7 @@ function speakAndLoop(text) {
             if (modal.classList.contains('active')) {
                 agentState = 'listening';
                 setRobotMood('listening', 'Listening', 'Listening for next command...');
+                setAgentConnectionState(true, 'Listening');
                 startRecognition();
             }
         };
