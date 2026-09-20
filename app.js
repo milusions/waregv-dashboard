@@ -284,7 +284,7 @@ function startNavWatchdog() {
 const wheelIds = ['fl', 'fr', 'bl', 'br'];
 const MAX_WHEEL_RAD_S = 20;
 const RAD_S_TO_RPM = 60 / (2 * Math.PI);
-const MAX_WHEEL_RPM = MAX_WHEEL_RAD_S * RAD_S_TO_RPM;
+const MAX_WHEEL_RPM = 95;   // fixed chart range: -95 .. +95 RPM
 const series = {};
 wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
@@ -2625,3 +2625,20 @@ document.addEventListener('keydown', e => {
     if (save && !save.hidden) closeMapSaveModal();
     if (preview && !preview.hidden) closeMapPreview();
 });
+
+
+// ---- vertical resize of the wheel-graph group (drag the bar above the graphs) ----
+(function () {
+    const bar = document.getElementById('graphs-resizer'); if (!bar) return;
+    const root = document.documentElement;
+    let startY = 0, startH = 0;
+    const curH = () => parseFloat(getComputedStyle(bar.parentElement).height) || 200;
+    const setH = (h) => root.style.setProperty('--graphs-h', Math.max(120, Math.min(h, window.innerHeight * 0.7)) + 'px');
+    bar.addEventListener('pointerdown', (e) => {
+        startY = e.clientY; startH = curH(); bar.classList.add('drag'); bar.setPointerCapture(e.pointerId); e.preventDefault();
+    });
+    bar.addEventListener('pointermove', (e) => { if (bar.classList.contains('drag')) { setH(startH + (startY - e.clientY)); needsDraw = true; } });
+    const end = () => bar.classList.remove('drag');
+    bar.addEventListener('pointerup', end); bar.addEventListener('pointercancel', end);
+    bar.addEventListener('dblclick', () => { root.style.removeProperty('--graphs-h'); needsDraw = true; });
+})();
