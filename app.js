@@ -2571,7 +2571,8 @@ async function openSelectedMapPreview() {
         const buffer = await r.arrayBuffer();
         const info = renderPgmToCanvas(buffer, canvas);
         loading.hidden = true;
-        canvas.hidden = false;
+        canvas.hidden = true;
+        initPreviewViewer(canvas, name);
         meta.textContent = info.width + ' × ' + info.height + ' px · PGM ' + info.magic;
     } catch (e) {
         loading.hidden = true;
@@ -2695,3 +2696,103 @@ document.addEventListener('keydown', e => {
 })();
 
 ensureMapDownloadBtn();
+
+
+// =====================================================================
+//  Map preview viewer: zoom (wheel / +/-), pan (drag), measure tool
+// =====================================================================
+(function () {
+    const st = document.createElement('style');
+    st.textContent = '.pv-wrap{display:flex;flex-direction:column;width:100%;gap:8px}' +
+        '.pv-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}' +
+        '.pv-btn{border:1px solid var(--border);background:var(--panel);color:var(--text);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}' +
+        '.pv-btn:hover{border-color:var(--muted)}.pv-btn.on{color:var(--primary);border-color:var(--primary)}' +
+        '.pv-info{margin-left:auto;font-size:12px;color:var(--muted);font-family:monospace}' +
+        '.pv-canvas{width:100%;height:62vh;border:1px solid var(--border);background:#e9ecef;border-radius:4px;touch-action:none;cursor:grab}' +
+        '.pv-canvas.measure{cursor:crosshair}';
+    document.head.appendChild(st);
+})();
+
+async function initPreviewViewer(srcCanvas, mapName) {
+    const body = srcCanvas.parentElement;
+    let wrap = body.querySelector('.pv-wrap'); if (wrap) wrap.remove();
+    wrap = document.createElement('div'); wrap.className = 'pv-wrap';
+    wrap.innerHTML = '<div class="pv-bar">' +
+        '<button class="pv-btn" data-a="in" title="Zoom in">＋</button><button class="pv-btn" data-a="out" title="Zoom out">－</button>' +
+        '<button class="pv-btn" data-a="fit">Fit</button>' +
+        '<button class="pv-btn" data-a="measure" title="Click two points to measure distance">📏 Measure</button>' +
+        '<button class="pv-btn" data-a="clear">Clear</button><span class="pv-info" id="pv-info">scroll = zoom · drag = pan</span></div>' +
+        '<canvas class="pv-canvas"></canvas>';
+    body.appendChild(wrap);
+    const cv = wrap.querySelector('canvas'), info = wrap.querySelector('.pv-info');
+    const src = srcCanvas, iw = src.width, ih = src.height;
+
+    // resolution (m/px) from the map yaml, so distances are real metres
+    let res = null;
+    try {
+        const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(mapName) + '/yaml?t=' + Date.now()), { cache: 'no-store' });
+        if (r.ok) { const m = /resolution:\s*([0-9.eE+-]+)/.exec(await r.text()); if (m) res = parseFloat(m[1]); }
+    } catch (_) {}
+
+    let s = 1, tx = 0, ty = 0, measure = false, pts = [], drag = null, moved = false;
+    const dpr = window.devicePixelRatio || 1;
+    const size = () => { const w = cv.clientWidth, h = cv.clientHeight;
+        if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+        return [w, h]; };
+    const toImg = (sx, sy) => [(sx - tx) / s, (sy - ty) / s];
+    function fit() { const [w, h] = size(); s = Math.min(w / iw, h / ih) * 0.95; tx = (w - iw * s) / 2; ty = (h - ih * s) / 2; draw(); }
+    function fmt(p, q) {
+        const px = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        return res ? (px * res).toFixed(2) + ' m  (' + (px * res * 100).toFixed(0) + ' cm)' : px.toFixed(1) + ' px (no resolution)';
+    }
+    function draw() {
+        const [w, h] = size(), ctx = cv.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+        ctx.imageSmoothingEnabled = false; ctx.drawImage(src, tx, ty, iw * s, ih * s);
+        if (pts.length) {
+            const P = pts.map(p => [tx + p[0] * s, ty + p[1] * s]);
+            ctx.strokeStyle = '#e5484d'; ctx.fillStyle = '#e5484d'; ctx.lineWidth = 2;
+            if (P.length === 2) { ctx.beginPath(); ctx.moveTo(P[0][0], P[0][1]); ctx.lineTo(P[1][0], P[1][1]); ctx.stroke(); }
+            P.forEach(q => { ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill(); });
+            if (P.length === 2) {
+                const label = fmt(pts[0], pts[1]), mx = (P[0][0] + P[1][0]) / 2, my = (P[0][1] + P[1][1]) / 2;
+                ctx.font = '600 13px Roboto, sans-serif'; const tw = ctx.measureText(label).width + 14;
+                ctx.fillStyle = '#e5484d'; ctx.beginPath(); ctx.roundRect(mx - tw / 2, my - 26, tw, 22, 6); ctx.fill();
+                ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mx, my - 15);
+                info.textContent = 'distance: ' + label;
+            }
+        }
+    }
+    function zoomAt(f, sx, sy) { const [ix, iy] = toImg(sx, sy); s = Math.max(0.05, Math.min(80, s * f)); tx = sx - ix * s; ty = sy - iy * s; draw(); }
+    cv.addEventListener('wheel', (e) => { e.preventDefault(); const r = cv.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+    cv.addEventListener('pointerdown', (e) => { cv.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, tx, ty }; moved = false; if (!measure) cv.style.cursor = 'grabbing'; });
+    cv.addEventListener('pointermove', (e) => {
+        if (drag) { const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+            if (moved && !measure) { tx = drag.tx + dx; ty = drag.ty + dy; draw(); } }
+        else if (measure && pts.length === 1) {   // live rubber-band preview
+            const r = cv.getBoundingClientRect(), q = toImg(e.clientX - r.left, e.clientY - r.top);
+            info.textContent = 'distance: ' + fmt(pts[0], q);
+        }
+    });
+    cv.addEventListener('pointerup', (e) => {
+        cv.style.cursor = '';
+        if (drag && !moved && measure) {
+            const r = cv.getBoundingClientRect(), q = toImg(e.clientX - r.left, e.clientY - r.top);
+            if (pts.length >= 2) pts = [];
+            pts.push(q); if (pts.length === 1) info.textContent = 'click the second point'; draw();
+        }
+        drag = null;
+    });
+    wrap.querySelectorAll('.pv-btn').forEach(b => b.addEventListener('click', () => {
+        const a = b.dataset.a, [w, h] = size();
+        if (a === 'in') zoomAt(1.4, w / 2, h / 2);
+        else if (a === 'out') zoomAt(1 / 1.4, w / 2, h / 2);
+        else if (a === 'fit') fit();
+        else if (a === 'clear') { pts = []; info.textContent = 'scroll = zoom · drag = pan'; draw(); }
+        else if (a === 'measure') { measure = !measure; b.classList.toggle('on', measure); cv.classList.toggle('measure', measure);
+            info.textContent = measure ? 'click two points to measure' + (res ? '' : ' (resolution unknown → pixels)') : 'scroll = zoom · drag = pan'; }
+    }));
+    new ResizeObserver(draw).observe(cv);
+    fit();
+}
