@@ -1369,9 +1369,12 @@ function playProcessingSound() {
 const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let inactivityTimer = null;
-const LISTEN_TIMEOUT_MS = 8000;      // nobody says anything -> go to sleep
+const LISTEN_TIMEOUT_MS = 0;
 let listenDeadline = 0, heardSpeech = false;
-let currentCallId = null; 
+let helioSocket = null;
+let helioSocketPromise = null;
+let helioConversationId = null;
+let helioSocketClosing = false; 
 
 const modal = document.getElementById('voice-modal');
 const robotFace = document.getElementById('robot-face');
@@ -1429,6 +1432,50 @@ function appendHistory(sender, text) {
     historyListEl.scrollTop = historyListEl.scrollHeight;
 }
 
+function clearAgentLiveStatus() {
+    const list = document.getElementById('agent-event-list');
+    if (list) list.innerHTML = '';
+}
+function appendAgentEvent(kind, message, detail = null) {
+    const list = document.getElementById('agent-event-list'); if (!list) return;
+    const item = document.createElement('div'); item.className = 'agent-event ' + String(kind || 'status').replace(/[^a-z-]/gi, '-');
+    const label = document.createElement('div'); label.className = 'agent-event-kind'; label.textContent = kind || 'status';
+    const body = document.createElement('div'); body.className = 'agent-event-message'; body.textContent = message || '';
+    if (detail !== null && detail !== undefined) { const pre = document.createElement('pre'); try { pre.textContent = typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2); } catch(e) { pre.textContent = String(detail); } body.appendChild(pre); }
+    item.appendChild(label); item.appendChild(body); list.appendChild(item); while (list.children.length > 60) list.removeChild(list.firstChild); list.scrollTop = list.scrollHeight;
+}
+function setAgentConnectionState(connected, text) {
+    const el = document.getElementById('agent-connection-state'); if (!el) return;
+    el.textContent = text || (connected ? 'Connected' : 'Offline'); el.classList.toggle('connected', !!connected);
+}
+function helioWsUrl() { const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'; return scheme + '//' + ROVER_HOST + ':8001/ws/helio'; }
+function connectHelioWebSocket() {
+    if (helioSocket && helioSocket.readyState === WebSocket.OPEN) return Promise.resolve(helioSocket);
+    if (helioSocketPromise) return helioSocketPromise;
+    helioSocketPromise = new Promise((resolve, reject) => {
+        const ws = new WebSocket(helioWsUrl()); helioSocket = ws; helioSocketClosing = false;
+        const timeout = setTimeout(() => { try { ws.close(); } catch(e) {} reject(new Error('Helio WebSocket connection timeout.')); }, 6000);
+        ws.onopen = () => { clearTimeout(timeout); setAgentConnectionState(true, 'Connected'); appendAgentEvent('status', 'Helio WebSocket connected.'); resolve(ws); };
+        ws.onmessage = event => { let data; try { data = JSON.parse(event.data); } catch(e) { return; } handleHelioSocketEvent(data); };
+        ws.onerror = () => { clearTimeout(timeout); setAgentConnectionState(false, 'Connection error'); if (ws.readyState !== WebSocket.OPEN) reject(new Error('Helio WebSocket connection failed.')); };
+        ws.onclose = () => { clearTimeout(timeout); if (helioSocket === ws) helioSocket = null; helioSocketPromise = null; setAgentConnectionState(false, 'Disconnected'); if (!helioSocketClosing && modal.classList.contains('active')) { appendAgentEvent('error', 'Helio WebSocket disconnected. Reconnecting…'); setTimeout(() => { if (modal.classList.contains('active')) connectHelioWebSocket().catch(() => {}); }, 500); } };
+    }).finally(() => { helioSocketPromise = null; });
+    return helioSocketPromise;
+}
+function handleHelioSocketEvent(data) {
+    if (data.conversation_id) helioConversationId = data.conversation_id;
+    switch (data.type) {
+        case 'session': appendAgentEvent('status', 'Conversation started.', data.conversation_id); break;
+        case 'status': appendAgentEvent(data.stage || 'status', data.message || ''); if (data.stage === 'thinking') setRobotMood('thinking', 'Thinking', data.message || 'Processing…'); else if (data.stage === 'tool_running') setRobotMood('thinking', 'Using tool', data.message || 'Accessing rover…'); break;
+        case 'model': appendAgentEvent('model', data.message || ''); break;
+        case 'tool_call': appendAgentEvent('tool-call', `${data.tool || 'tool'}()`, data.inputs || {}); setRobotMood('thinking', 'Using tool', `Calling ${data.tool || 'tool'}…`); break;
+        case 'tool_result': appendAgentEvent('tool-result', `${data.tool || 'tool'} completed`, data.result); break;
+        case 'final': { stopThinkingIndicator(); const finalText = data.output || "I didn't receive a valid response."; appendHistory('agent', finalText); speakAndLoop(finalText); break; }
+        case 'error': stopThinkingIndicator(); appendAgentEvent('error', data.message || 'Unknown Helio error.'); setRobotMood('listening', 'Ready', data.message || 'I ran into a problem.'); break;
+    }
+}
+function closeHelioWebSocket() { helioSocketClosing = true; if (helioSocket) { try { helioSocket.close(1000, 'Helio closed by user'); } catch(e) {} } helioSocket = null; helioSocketPromise = null; helioConversationId = null; setAgentConnectionState(false, 'Offline'); }
+
 const SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
 const SILENCE_COMMIT_MS = 1200;   // no new words for this long after speaking -> send what we have
 const MAX_UTTERANCE_MS = 30000;   // hard cap on one listening session
@@ -1476,20 +1523,8 @@ if (SpeechRecognitionImpl) {
     recognition.lang = SPEECH_LANG;
 
     recognition.onstart = () => {
-        const restarting = !heardSpeech && listenDeadline && Date.now() < listenDeadline;
-        agentState = 'listening';
-        committed = false;
-        if (!restarting) {
-            heardSpeech = false; lastText = '';
-            listenStartedAt = Date.now();
-            listenDeadline = Date.now() + LISTEN_TIMEOUT_MS;
-            setRobotMood('listening', 'Listening', 'Speak your command...');
-            playListenSound();
-        }
-        clearListenTimers();
-        inactivityTimer = setTimeout(() => {
-            if (agentState === 'listening' && !heardSpeech) goToSleep();
-        }, Math.max(0, listenDeadline - Date.now()));
+        agentState = 'listening'; committed = false; heardSpeech = false; lastText = '';
+        listenStartedAt = Date.now(); listenDeadline = 0; setRobotMood('listening', 'Listening', 'Speak your command...'); playListenSound(); clearListenTimers();
     };
 
     recognition.onerror = (e) => {
@@ -1523,9 +1558,8 @@ if (SpeechRecognitionImpl) {
 
     recognition.onend = () => {
         if (agentState !== 'listening' || committed) return;
-        if (heardSpeech && lastText) { commitUtterance(lastText); return; }   // never leave words hanging
-        if (Date.now() < listenDeadline - 300) startRecognition();
-        else goToSleep();
+        if (heardSpeech && lastText) { commitUtterance(lastText); return; }
+        setTimeout(() => { if (modal.classList.contains('active') && agentState === 'listening' && !committed) startRecognition(); }, 120);
     };
 
     // Watchdog: nothing may leave the assistant stuck in "listening"
@@ -1533,9 +1567,8 @@ if (SpeechRecognitionImpl) {
         if (agentState !== 'listening' || committed) return;
         const now = Date.now();
         if (heardSpeech && lastText && now - lastResultAt > SILENCE_COMMIT_MS + 700) commitUtterance(lastText);
-        else if (!heardSpeech && listenDeadline && now > listenDeadline + 600) goToSleep();
-        else if (listenStartedAt && now - listenStartedAt > MAX_UTTERANCE_MS) {
-            if (lastText) commitUtterance(lastText); else goToSleep();
+                else if (listenStartedAt && now - listenStartedAt > MAX_UTTERANCE_MS) {
+            if (lastText) commitUtterance(lastText); else { committed = true; setTimeout(() => { if (modal.classList.contains('active') && agentState === 'listening') startRecognition(); }, 100); }
         }
     }, 400);
 } else {
@@ -1552,174 +1585,42 @@ function setRobotMood(className, statusMsg, captionMsg) {
 
 function openVoiceModal() {
     if (!recognition) return alert("Voice not supported on this browser.");
-    if (modal.classList.contains('active') && agentState === 'asleep') return wakeFromSleep();
-    stopWake();
-    modal.classList.add('active');
-    playStartupSound();
-
-    const bubble = document.getElementById('speech-bubble');
-    const greeting = 'Hello! How can I help?';
-    if (bubble) {
-        bubble.textContent = greeting;
-        bubble.classList.add('show');
-        setTimeout(() => bubble.classList.remove('show'), 3200);
-    }
-
-    if (!currentCallId) {
-        currentCallId = String(Math.floor(Math.random() * 900) + 100);
-    }
-
-    agentState = 'speaking';
-    setRobotMood('speaking', 'Helio', greeting);
-
+    if (modal.classList.contains('active')) return;
+    stopWake(); modal.classList.add('active'); playStartupSound(); clearAgentLiveStatus(); setAgentConnectionState(false, 'Connecting…');
+    const bubble = document.getElementById('speech-bubble'), greeting = 'Hello! How can I help?';
+    if (bubble) { bubble.textContent = greeting; bubble.classList.add('show'); setTimeout(() => bubble.classList.remove('show'), 3200); }
+    agentState = 'speaking'; setRobotMood('speaking', 'Helio', greeting);
+    connectHelioWebSocket().catch(err => { appendAgentEvent('error', err.message || 'Unable to connect to Helio.'); setRobotMood('listening', 'Ready', 'Connection failed. Retrying…'); });
     if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const greetUtterance = new SpeechSynthesisUtterance(greeting);
-        greetUtterance.lang = 'en-US';
-        greetUtterance.rate = 1.0;
-        let listenStarted = false, greetSpoke = false;
-        const startListening = () => {
-            if (listenStarted) return;
-            listenStarted = true;
-            if (modal.classList.contains('active') && agentState === 'speaking') {
-                agentState = 'listening';
-                startRecognition();
-            }
-        };
-        greetUtterance.onstart = () => { greetSpoke = true; };
-        greetUtterance.onend = startListening;
-        greetUtterance.onerror = startListening;
-        setTimeout(() => { if (!greetSpoke) startListening(); }, 1500);
-        window.currentUtterance = greetUtterance;
-        window.currentSpokenText = greeting;
-        window.speechSynthesis.speak(greetUtterance);
-        syncWake();   // wake word can interrupt the greeting
-    } else {
-        agentState = 'listening';
-        startRecognition();
-    }
+        window.speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(greeting); u.lang='en-US'; u.rate=1.0;
+        const startListening = () => { if (modal.classList.contains('active') && agentState === 'speaking') { agentState='listening'; startRecognition(); } };
+        u.onend=startListening; u.onerror=startListening; setTimeout(startListening,1500); window.currentUtterance=u; window.currentSpokenText=greeting; window.speechSynthesis.speak(u);
+    } else { agentState='listening'; startRecognition(); }
 }
-
 function closeVoiceModal() {
-    agentState = 'idle';
-    listenDeadline = 0;
-    clearListenTimers();
-    modal.classList.remove('active');
-    
-    currentCallId = null;
-    historyListEl.innerHTML = '';
-    const bubble = document.getElementById('speech-bubble');
-    if (bubble) bubble.classList.remove('show');
-
-    if (recognition) {
-        try { recognition.stop(); } catch(e){}
-    }
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    stopThinkingIndicator();
-    const ui = document.getElementById('user-input');
-    if (ui) ui.value = '';
-    syncWake();
+    agentState='idle'; listenDeadline=0; clearListenTimers(); modal.classList.remove('active'); historyListEl.innerHTML=''; clearAgentLiveStatus();
+    const bubble=document.getElementById('speech-bubble'); if (bubble) bubble.classList.remove('show');
+    if (recognition) { try { recognition.stop(); } catch(e){} } if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    stopThinkingIndicator(); closeHelioWebSocket(); const ui=document.getElementById('user-input'); if(ui) ui.value=''; syncWake();
 }
 
 async function sendManualText() {
-    const input = document.getElementById('user-input');
-    const btn = document.getElementById('manual-send-btn');
-    const text = (input && input.value ? input.value : '').trim();
-
-    if (!text) {
-        notify('WARNING', 'Enter a command before pressing SEND.');
-        if (input) input.focus();
-        return;
-    }
-
-    if (!modal.classList.contains('active')) {
-        openVoiceModal();
-    }
-
-    if (!currentCallId) {
-        currentCallId = String(Math.floor(Math.random() * 900) + 100);
-    }
-
-    appendHistory('you', text);
-    if (input) input.value = '';
-
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = 'SENDING…';
-    }
-
-    try {
-        await processVoiceCommand(text);
-    } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = 'SEND';
-        }
-    }
+    const input=document.getElementById('user-input'), btn=document.getElementById('manual-send-btn'), text=(input&&input.value?input.value:'').trim();
+    if(!text){notify('WARNING','Enter a command before pressing SEND.');if(input)input.focus();return;}
+    if(!modal.classList.contains('active')) openVoiceModal(); appendHistory('you',text); if(input)input.value='';
+    if(btn){btn.disabled=true;btn.textContent='SENDING…';} try{await processVoiceCommand(text);}finally{if(btn){btn.disabled=false;btn.textContent='SEND';}}
 }
-
 async function processVoiceCommand(text) {
-    agentState = 'thinking';
-    listenDeadline = 0;
-    clearListenTimers();
-    try { recognition.stop(); } catch(e){}
-
-    setRobotMood('thinking', 'Processing', text);
-    startThinkingIndicator();
-    playProcessingSound();
-
-    // Check if Hinglish mode is active
-    const isHinglish = document.getElementById('hinglish-toggle') && document.getElementById('hinglish-toggle').checked;
-    const baseMessage = `MAIN PROMPT: ${text}\nUSER INPUT FIELD: ${(document.getElementById('user-input').value || '').trim()}`;
-    
-    const payloadMessage = isHinglish 
-        ? `[CRITICAL INSTRUCTION: The user is speaking in Hinglish (Hindi written in English alphabet). Translate the user's query to English internally to understand it, formulate your response, and then TRANSLATE YOUR ENTIRE FINAL RESPONSE BACK TO HINGLISH. Your final output must be exclusively in Hinglish (Hindi words written with English letters) so the text-to-speech sounds like conversational Hindi.]\n\n${baseMessage}`
-        : baseMessage;
-
-    try {
-        const response = await fetch('http://' + ROVER_HOST + ':8001/agentic/waregv', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                call_id: currentCallId,
-                message: payloadMessage
-            })
-        });
-
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-
-        const data = await response.json();
-        stopThinkingIndicator();
-        const agentResponseText = data.output || "I didn't receive a valid response.";
-        
-        appendHistory('agent', agentResponseText);
-        speakAndLoop(agentResponseText);
-
-    } catch (err) {
-        stopThinkingIndicator();
-        const friendlyMsg = "Sorry, I am having trouble connecting. Try again later.";
-        appendHistory('agent', friendlyMsg);
-        speakThenClose(friendlyMsg);
-    }
+    agentState='thinking'; listenDeadline=0; clearListenTimers(); try{recognition.stop();}catch(e){}
+    setRobotMood('thinking','Processing',text); startThinkingIndicator(); playProcessingSound();
+    const isHinglish=document.getElementById('hinglish-toggle')&&document.getElementById('hinglish-toggle').checked;
+    const userField=document.getElementById('user-input'); const baseMessage=`MAIN PROMPT: ${text}\nUSER INPUT FIELD: ${(userField&&userField.value||'').trim()}`;
+    const payloadMessage=isHinglish?`[CRITICAL INSTRUCTION: The user is speaking in Hinglish (Hindi written in English alphabet). Translate the user's query to English internally to understand it, formulate your response, and then TRANSLATE YOUR ENTIRE FINAL RESPONSE BACK TO HINGLISH. Your final output must be exclusively in Hinglish (Hindi words written with English letters) so the text-to-speech sounds like conversational Hindi.]\n\n${baseMessage}`:baseMessage;
+    try{const ws=await connectHelioWebSocket();if(ws.readyState!==WebSocket.OPEN)throw new Error('Helio WebSocket is not connected.');ws.send(JSON.stringify({type:'message',message:payloadMessage}));appendAgentEvent('status','Request sent over WebSocket.');}
+    catch(err){stopThinkingIndicator();appendAgentEvent('error',err.message||'Helio connection error.');speakAndLoop('Sorry, I am having trouble connecting to Helio.');}
 }
 
-function speakThenClose(text) {
-    agentState = 'speaking';
-    setRobotMood('speaking', 'Connection Error', text);
-
-    if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'en-US';
-        utterance.rate = 1.0;
-        utterance.onend = () => setTimeout(closeVoiceModal, 600);
-        window.currentUtterance = utterance;
-        window.currentSpokenText = text;
-        window.speechSynthesis.speak(utterance);
-    } else {
-        setTimeout(closeVoiceModal, 3000);
-    }
-}
+function speakThenClose(text) { speakAndLoop(text); }
 
 function speakAndLoop(text) {
     agentState = 'speaking';
@@ -1750,7 +1651,7 @@ function speakAndLoop(text) {
         window.speechSynthesis.speak(utterance);
         syncWake();   // say the wake word to interrupt
     } else {
-        setTimeout(closeVoiceModal, 4000); 
+        setTimeout(() => { if (modal.classList.contains('active')) { agentState='listening'; startRecognition(); } }, 300); 
     }
 }
 
@@ -1841,7 +1742,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWakeM
 
 function syncWake() {
     const popupOpen = modal.classList.contains('active');
-    const should = wakeEnabled && !wakeBlocked && SpeechRecognitionImpl && (!popupOpen || agentState === 'asleep' || agentState === 'speaking');
+    const should = wakeEnabled && !wakeBlocked && SpeechRecognitionImpl && !popupOpen;
     if (should) startWake(); else stopWake();
 }
 function startWake() {
@@ -1888,8 +1789,7 @@ if (SpeechRecognitionImpl) {
                 if (agentState === 'speaking') {
                     if (isEchoOfSpeech(t)) continue;
                     if (!bargeInAllowed()) continue;
-                    const wc = (t.toLowerCase().match(/[a-z\u0900-\u097f']+/g) || []).length;
-                    if (WAKE_RE.test(t) || (wc >= 3 && t.trim().length >= 14)) { onWakeWord(WAKE_RE.test(t) ? '' : t); return; }
+                    if (t.trim().length >= 2) { onWakeWord(t); return; }
                     continue;
                 }
 
@@ -1955,17 +1855,11 @@ function onWakeWord(initialText = '') {
         if (agentState === 'asleep') {
             wakeFromSleep();
         } else if (agentState === 'speaking' || agentState === 'thinking') {
-            agentState = 'listening';
-            listenDeadline = Date.now() + LISTEN_TIMEOUT_MS; 
-            
-            // Buffer the interrupted speech
-            heardSpeech = !!initialText; 
-            lastText = initialText;
-            if (initialText) captionText.textContent = initialText;
-
-            setRobotMood('listening', 'Listening', 'Interrupted. Listening...');
-            playStartupSound();
-            setTimeout(() => { if (agentState === 'listening') startRecognition(); }, 220);
+            window.currentUtterance = null; agentState='listening'; listenDeadline=0;
+            if ('speechSynthesis' in window) window.speechSynthesis.cancel(); stopThinkingIndicator();
+            heardSpeech=!!initialText; lastText=initialText; committed=false; if(initialText) captionText.textContent=initialText;
+            setRobotMood('listening','Listening','I heard you. Listening…'); playListenSound();
+            setTimeout(() => { if(agentState==='listening') startRecognition(); },80);
         }
     } else {
         openVoiceModal();
@@ -1973,32 +1867,13 @@ function onWakeWord(initialText = '') {
 }
 
 function goToSleep() {
-    if (!modal.classList.contains('active') || agentState === 'asleep') return;
-    agentState = 'asleep';
-    listenDeadline = 0;
-    clearListenTimers();
-    try { recognition.stop(); } catch (e) {}
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    setRobotMood('sleeping', 'Sleeping', 'Say "' + wakeWord + '" to wake me up');
-    syncWake();
+    if (!modal.classList.contains('active')) return; agentState='listening'; listenDeadline=0; clearListenTimers();
+    try{recognition.stop();}catch(e){} setRobotMood('listening','Listening','Still listening…');
+    setTimeout(()=>{if(modal.classList.contains('active')&&agentState==='listening')startRecognition();},100);
 }
 
 function wakeFromSleep() {
-    stopWake();
-    agentState = 'waking';
-    setRobotMood('startled', 'Awake', 'Yes?');
-    playStartupSound();
-    const bubble = document.getElementById('speech-bubble');
-    if (bubble) {
-        bubble.textContent = 'Yes?';
-        bubble.classList.add('show');
-        setTimeout(() => bubble.classList.remove('show'), 2202);
-    }
-    setTimeout(() => {
-        if (modal.classList.contains('active') && agentState === 'waking') {
-            try { recognition.start(); } catch (e) { console.log(e); }
-        }
-    }, 750);
+    if(!modal.classList.contains('active')) return; stopWake(); agentState='listening'; setRobotMood('listening','Listening','Listening…'); startRecognition();
 }
 
 updateWakeBtn();

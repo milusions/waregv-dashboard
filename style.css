@@ -1225,3 +1225,32 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     .ml-spinner, .plan-spinner { animation-duration: 2.4s; }
     .ml-dots i { animation: none; opacity: 1; }
 }
+/* ----- Helio live WebSocket agent stream ----- */
+.agent-live-status {
+    width: min(640px, 100%);
+    max-height: 210px;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel-2);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+.agent-live-status-head {
+    min-height: 28px; padding: 0 9px; display: flex; align-items: center;
+    justify-content: space-between; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: .08em;
+}
+#agent-connection-state { color: var(--warning); letter-spacing: normal; }
+#agent-connection-state.connected { color: var(--success); }
+.agent-event-list { overflow-y: auto; padding: 5px 7px; min-height: 36px; max-height: 180px; font-family: var(--font); }
+.agent-event { display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 7px; padding: 4px 2px; border-bottom: 1px solid rgba(128,128,128,.10); font-size: .67rem; line-height: 1.35; }
+.agent-event:last-child { border-bottom: none; }
+.agent-event-kind { color: var(--primary); font-weight: 800; text-transform: uppercase; }
+.agent-event-message { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.agent-event.tool-call .agent-event-kind { color: var(--primary); }
+.agent-event.tool-result .agent-event-kind { color: var(--success); }
+.agent-event.error .agent-event-kind { color: var(--danger); }
+.agent-event.status .agent-event-kind { color: var(--warning); }
+.agent-event pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--muted); }
