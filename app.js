@@ -13,13 +13,14 @@ const CFG = {
         cmdVel: '/cmd_vel',
         joy: '/joy',
         camera: '/camera/image_raw',
-        scan: '/scan'
+        scan: '/scan',
+        globalCostmap: '/global_costmap/costmap',
+        localCostmap: '/local_costmap/costmap',
+        navEvents: '/nav_ui_events'
     },
     mapFrame: 'map',
     baseFrames: ['base_link', 'base_footprint'],
-    cmdOrder: ['fl', 'fr', 'bl', 'br'],
-    // /joint_states velocity order: FR, FL, RR, RL
-    jointOrder: ['fr', 'fl', 'br', 'bl'],
+    cmdOrder: ['fr', 'br', 'fl', 'bl'],
     jointOverrides: {},
     modeUrl: '/system/mode',
     modeTimeoutMs: 40000,
@@ -29,12 +30,7 @@ const CFG = {
     joyRateHz: 20
 };
 
-const MODE_LABELS = {
-    manual: 'Manual Driving (Mapping Off)',
-    slam: 'Manual Driving + New Mapping',
-    slam_update: 'Autonomous Driving + Map Update',
-    nav: 'Autonomous Driving (Fixed Map)'
-};
+const MODE_LABELS = { manual: 'Manual Driving (Mapping Off)', slam: 'Manual Driving + New Mapping', slam_update: 'Autonomous Driving + Map Update', nav: 'Autonomous Driving (Fixed Map)' };
 
 // =====================================================================
 //  Notifications
@@ -101,9 +97,12 @@ const mapCanvasOff = document.createElement('canvas');
 const tfTree = {};
 let odom = null;
 let robot = null;
-let latestScan = null;
-let showLaserScan = true;
 let currentCmdVel = { linear: 0, angular: 0 };
+let latestScan = null;
+let latestGlobalCostmap = null;
+let latestLocalCostmap = null;
+let showLaserScan = true, showGlobalCostmap = true, showLocalCostmap = true;
+let latestNavEvent = null;
 
 let activeNavBtn = null;
 let navInitTimeout = null;
@@ -165,9 +164,6 @@ function startNavWatchdog() {
 }
 
 const wheelIds = ['fl', 'fr', 'bl', 'br'];
-const MAX_WHEEL_RAD_S = 20;
-const RAD_S_TO_RPM = 60 / (2 * Math.PI);
-const MAX_WHEEL_RPM = MAX_WHEEL_RAD_S * RAD_S_TO_RPM;
 const series = {};
 wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
@@ -210,9 +206,6 @@ ros.on('connection', () => {
     if (rosState !== 'up') notify('INFO', 'Connected to rosbridge.');
     rosState = 'up';
     subscribeAll();
-    // REST map discovery is independent of rosbridge. Fetch here as well as
-    // during init so the dropdown is populated after the rover connection is ready.
-    fetchMaps({ notifyError: false });
 });
 ros.on('error', () => {
     statusEl.textContent = 'Connection Error';
@@ -251,6 +244,25 @@ function subscribeAll() {
             yaw: quatYaw(m.info.origin.orientation), data: m.data
         };
         mapImageDirty = true; needsDraw = true;
+    });
+
+    mk(T.scan, 'sensor_msgs/LaserScan', (m) => {
+        latestScan = { frame: strip(m.header && m.header.frame_id), angleMin: Number(m.angle_min)||0,
+            angleInc: Number(m.angle_increment)||0, rangeMin: Number(m.range_min)||0,
+            rangeMax: Number(m.range_max)||0, ranges: Array.isArray(m.ranges) ? m.ranges.slice() : [] };
+        needsDraw = true;
+    });
+    mk(T.globalCostmap, 'nav_msgs/OccupancyGrid', (m) => {
+        latestGlobalCostmap = { w:m.info.width,h:m.info.height,res:m.info.resolution,ox:m.info.origin.position.x,oy:m.info.origin.position.y,yaw:quatYaw(m.info.origin.orientation),data:m.data };
+        needsDraw = true;
+    });
+    mk(T.localCostmap, 'nav_msgs/OccupancyGrid', (m) => {
+        latestLocalCostmap = { w:m.info.width,h:m.info.height,res:m.info.resolution,ox:m.info.origin.position.x,oy:m.info.origin.position.y,yaw:quatYaw(m.info.origin.orientation),data:m.data };
+        needsDraw = true;
+    });
+    mk(T.navEvents, 'std_msgs/String', (m) => {
+        try { latestNavEvent = JSON.parse(m.data); } catch(e) { latestNavEvent = {text:m.data,level:'INFO',stamp:Date.now()/1000}; }
+        needsDraw = true;
     });
 
     mk(T.plan, 'nav_msgs/Path', (m) => {
@@ -299,19 +311,6 @@ function subscribeAll() {
 
     mk(T.joint, 'sensor_msgs/JointState', onJointState);
 
-    mk(T.scan, 'sensor_msgs/LaserScan', (m) => {
-        latestScan = {
-            frame: strip(m.header && m.header.frame_id),
-            stamp: m.header && m.header.stamp ? m.header.stamp : null,
-            angleMin: Number(m.angle_min) || 0,
-            angleInc: Number(m.angle_increment) || 0,
-            rangeMin: Number(m.range_min) || 0,
-            rangeMax: Number(m.range_max) || 0,
-            ranges: Array.isArray(m.ranges) ? m.ranges.slice() : []
-        };
-        needsDraw = true;
-    });
-
     const cam = new ROSLIB.Topic({ ros, name: T.camera, messageType: 'sensor_msgs/Image', throttle_rate: 100, queue_length: 1 });
     cam.subscribe(onCameraImage); subs.push(cam);
 
@@ -321,68 +320,6 @@ function subscribeAll() {
     }, () => notify('WARNING', 'Command topic ' + T.cmd + ' not found; wheel command traces will be empty.'));
 
     joyTopic = new ROSLIB.Topic({ ros, name: T.joy, messageType: 'sensor_msgs/Joy' });
-}
-
-function resolveFramePose(frame) {
-    frame = strip(frame);
-    if (!frame) return null;
-    if (frame === CFG.mapFrame) return { x: 0, y: 0, yaw: 0 };
-
-    let cur = frame;
-    let acc = { x: 0, y: 0, yaw: 0 };
-    let depth = 0;
-    while (cur !== CFG.mapFrame && depth++ < 20) {
-        const t = tfTree[cur];
-        if (!t) return null;
-        const c = Math.cos(t.yaw), ss = Math.sin(t.yaw);
-        acc = {
-            x: t.x + c * acc.x - ss * acc.y,
-            y: t.y + ss * acc.x + c * acc.y,
-            yaw: t.yaw + acc.yaw
-        };
-        cur = t.parent;
-    }
-    return cur === CFG.mapFrame ? acc : null;
-}
-
-function drawLaserScan(ctx) {
-    if (!showLaserScan || !latestScan || !latestScan.ranges.length) return;
-
-    const scan = latestScan;
-    const pose = resolveFramePose(scan.frame) || robot;
-    if (!pose) return;
-
-    const framePose = resolveFramePose(scan.frame);
-    const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
-    const step = Math.max(1, Math.ceil(scan.ranges.length / 1800));
-
-    ctx.save();
-    ctx.fillStyle = theme['--primary'];
-    ctx.globalAlpha = 0.72;
-
-    for (let i = 0; i < scan.ranges.length; i += step) {
-        const r = Number(scan.ranges[i]);
-        if (!Number.isFinite(r) || r < scan.rangeMin || r > scan.rangeMax) continue;
-
-        const a = scan.angleMin + i * scan.angleInc;
-        let lx = r * Math.cos(a), ly = r * Math.sin(a);
-
-        // Transform laser-frame coordinates into map coordinates when TF is available.
-        if (framePose) {
-            const fc = Math.cos(framePose.yaw), fs = Math.sin(framePose.yaw);
-            const mx = framePose.x + fc * lx - fs * ly;
-            const my = framePose.y + fs * lx + fc * ly;
-            const p = w2s(mx, my);
-            ctx.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 2);
-        } else {
-            // Fallback: treat the scan frame as coincident with the rover base.
-            const mx = pose.x + c * lx - s * ly;
-            const my = pose.y + s * lx + c * ly;
-            const p = w2s(mx, my);
-            ctx.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 2);
-        }
-    }
-    ctx.restore();
 }
 
 function resolveRobotPose() {
@@ -428,17 +365,15 @@ function pushPoint(arr, v) {
     while (arr.length && arr[0].t < cutoff) arr.shift();
 }
 function onJointState(m) {
-    if (!m.velocity) return;
-    // The rover publishes /joint_states velocities in this fixed order:
-    // [FR, FL, RR, RL].  Do not use the joint-name order here because the
-    // controller's JointState array is intentionally ordered differently.
-    CFG.jointOrder.forEach((id, i) => {
-        if (typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i] * RAD_S_TO_RPM);
+    if (!m.velocity || !m.name) return;
+    m.name.forEach((n, i) => {
+        const id = classifyJoint(n);
+        if (id && typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i]);
     });
 }
 function onCommand(m) {
     if (!m.data) return;
-    CFG.cmdOrder.forEach((id, i) => { if (typeof m.data[i] === 'number') pushPoint(series[id].c, m.data[i] * RAD_S_TO_RPM); });
+    CFG.cmdOrder.forEach((id, i) => { if (typeof m.data[i] === 'number') pushPoint(series[id].c, m.data[i]); });
 }
 
 const camCanvas = document.getElementById('cam-canvas');
@@ -496,11 +431,12 @@ function drawChart(id) {
     const pw = w - L - R, ph = h - T - B;
     const A = series[id].a.filter(p => p.t >= t0 - 1), C = series[id].c;
 
-    // Fixed wheel-speed scale: ±20 rad/s converted to RPM.
-    // The scale never changes with the incoming data, so all four graphs
-    // remain directly comparable.
-    const lo = -MAX_WHEEL_RPM;
-    const hi = MAX_WHEEL_RPM;
+    let lo = Infinity, hi = -Infinity;
+    const scan = p => { if (p.t >= t0 - 1) { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); } };
+    A.forEach(scan); C.forEach(scan);
+    if (!isFinite(lo)) { lo = -1; hi = 1; }
+    if (hi - lo < 0.2) { const mid = (hi + lo) / 2; lo = mid - 0.1; hi = mid + 0.1; }
+    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
 
     const X = t => L + ((t - t0) / win) * pw;
     const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
@@ -512,14 +448,8 @@ function drawChart(id) {
     for (let i = 0; i <= 4; i++) {
         const v = lo + (hi - lo) * (i / 4), y = Math.round(Y(v)) + 0.5;
         ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
-        ctx.fillText(v.toFixed(0), L - 6, y);
+        ctx.fillText(v.toFixed(2), L - 6, y);
     }
-    ctx.save();
-    ctx.translate(11, T + ph / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('RPM', 0, 0);
-    ctx.restore();
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (let s = 0; s <= win; s += 10) {
         const x = Math.round(X(t0 + s)) + 0.5;
@@ -591,15 +521,6 @@ function fitMapView() {
 function toggleFollow() {
     follow = !follow;
     document.getElementById('follow-btn').classList.toggle('on', follow);
-    needsDraw = true;
-}
-function toggleLaserScan() {
-    showLaserScan = !showLaserScan;
-    const btn = document.getElementById('scan-btn');
-    if (btn) {
-        btn.classList.toggle('on', showLaserScan);
-        btn.textContent = showLaserScan ? 'Scan On' : 'Scan Off';
-    }
     needsDraw = true;
 }
 
@@ -699,115 +620,139 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
-// Simple straight-line planning loader shown while Nav2 is calculating.
-// Uses direct segments between the robot and requested targets; no artificial wobble.
+// Fictional "thinking" path: robot -> waypoints... -> target, drawn progressively and looped
+// until Nav2 publishes the real plan.
 function drawPlanAnim(ctx, now) {
     if (!planAnim) return;
-    const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets || []) : (planAnim.targets || []);
+    const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets) : planAnim.targets;
     if (nodesW.length < 2) return;
 
-    const S = nodesW.map(n => w2s(n.x, n.y));
-    const segments = [];
-    let total = 0;
-    for (let i = 0; i < S.length - 1; i++) {
-        const a = S[i], b = S[i + 1];
-        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        if (len < 0.5) continue;
-        segments.push({ a, b, len, start: total });
-        total += len;
-    }
-    if (total < 1) return;
-
     const el = now - planAnim.t0;
-    const cycle = PLAN_DRAW_MS + PLAN_HOLD_MS + PLAN_FADE_MS;
-    const p = el % cycle;
-    let progress = 1;
-    let alpha = 1;
+    const p = el % (PLAN_DRAW_MS + PLAN_HOLD_MS + PLAN_FADE_MS);
+    let prog = 1, alpha = 1;
+    if (p < PLAN_DRAW_MS) { const u = p / PLAN_DRAW_MS; prog = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; }
+    else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) alpha = 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS;
 
-    if (p < PLAN_DRAW_MS) {
-        const u = p / PLAN_DRAW_MS;
-        progress = u * u * (3 - 2 * u); // smoothstep
-    } else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) {
-        alpha = Math.max(0, 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS);
+    // Wobbling polyline in screen space (wobble is 0 at every node, so it passes exactly through them)
+    const S = nodesW.map(n => w2s(n.x, n.y));
+    const pts = [S[0]], nodeIdx = [0], phase = el / 260;
+    for (let i = 0; i < S.length - 1; i++) {
+        const a = S[i], b = S[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+        if (len < 1) { pts.push(b); nodeIdx.push(pts.length - 1); continue; }
+        const nx = -dy / len, ny = dx / len;
+        const n = Math.max(6, Math.ceil(len / 8));
+        const amp = Math.min(16, len * 0.14);
+        const waves = Math.max(1, Math.round(len / 110));
+        for (let k = 1; k <= n; k++) {
+            const t = k / n;
+            const off = amp * Math.sin(Math.PI * t) * Math.sin(2 * Math.PI * waves * t + phase + i * 1.7);
+            pts.push([a[0] + dx * t + nx * off, a[1] + dy * t + ny * off]);
+        }
+        nodeIdx.push(pts.length - 1);
     }
-
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const total = cum[cum.length - 1];
+    if (total < 1) return;
+    const headLen = prog * total;
     const col = theme['--primary'];
-    const headDist = progress * total;
 
     ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
-    // Very subtle full route preview.
-    ctx.globalAlpha = 0.16 * alpha;
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([5, 7]);
-    ctx.beginPath();
-    segments.forEach((seg, i) => {
-        if (i === 0) ctx.moveTo(seg.a[0], seg.a[1]);
-        ctx.lineTo(seg.b[0], seg.b[1]);
-    });
-    ctx.stroke();
+    // faint ghost of the whole route
+    ctx.globalAlpha = 0.18 * alpha; ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+    ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
     ctx.setLineDash([]);
 
-    // Clean, straight progress line.
-    ctx.globalAlpha = 0.95 * alpha;
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    let started = false;
-    for (const seg of segments) {
-        if (headDist <= seg.start) break;
-        const travelled = Math.min(headDist - seg.start, seg.len);
-        const t = travelled / seg.len;
-        const x = seg.a[0] + (seg.b[0] - seg.a[0]) * t;
-        const y = seg.a[1] + (seg.b[1] - seg.a[1]) * t;
-        if (!started) {
-            ctx.moveTo(seg.a[0], seg.a[1]);
-            started = true;
+    // drawn trail with a fading tail
+    ctx.lineWidth = 3.5; ctx.strokeStyle = col;
+    let head = pts[0];
+    for (let i = 1; i < pts.length && cum[i - 1] < headLen; i++) {
+        let x = pts[i][0], y = pts[i][1];
+        if (cum[i] > headLen) {
+            const t = (headLen - cum[i - 1]) / (cum[i] - cum[i - 1]);
+            x = pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t;
+            y = pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t;
         }
-        ctx.lineTo(x, y);
-        if (travelled < seg.len) break;
-    }
-    if (started) ctx.stroke();
-
-    // Small moving indicator at the planning head.
-    let head = S[0];
-    for (const seg of segments) {
-        if (headDist <= seg.start + seg.len) {
-            const t = Math.max(0, Math.min(1, (headDist - seg.start) / seg.len));
-            head = [
-                seg.a[0] + (seg.b[0] - seg.a[0]) * t,
-                seg.a[1] + (seg.b[1] - seg.a[1]) * t
-            ];
-            break;
-        }
+        ctx.globalAlpha = alpha * Math.max(0.25, 1 - (headLen - cum[i - 1]) / 260);
+        ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(x, y); ctx.stroke();
+        head = [x, y];
     }
 
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(head[0], head[1], 4, 0, Math.PI * 2);
-    ctx.fill();
+    // rippling markers on every waypoint / target the head has passed
+    for (let j = 1; j < nodeIdx.length; j++) {
+        if (cum[nodeIdx[j]] > headLen + 0.5) continue;
+        const q = pts[nodeIdx[j]], f = ((el / 900) + j * 0.3) % 1;
+        ctx.globalAlpha = alpha * (1 - f) * 0.7; ctx.lineWidth = 2; ctx.strokeStyle = col;
+        ctx.beginPath(); ctx.arc(q[0], q[1], 6 + f * 14, 0, 7); ctx.stroke();
+        ctx.globalAlpha = alpha; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill();
+    }
 
-    // Small endpoint markers, kept intentionally minimal.
-    for (let i = 1; i < S.length; i++) {
-        let distanceToNode = 0;
-        for (const seg of segments) {
-            if (Math.abs(seg.b[0] - S[i][0]) < 0.5 && Math.abs(seg.b[1] - S[i][1]) < 0.5) {
-                distanceToNode = seg.start + seg.len;
-                break;
-            }
-        }
-        if (distanceToNode <= headDist + 0.5) {
-            ctx.globalAlpha = 0.8 * alpha;
-            ctx.beginPath();
-            ctx.arc(S[i][0], S[i][1], 3, 0, Math.PI * 2);
-            ctx.fill();
+    // glowing head
+    if (prog < 1) {
+        ctx.globalAlpha = alpha * 0.3; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(head[0], head[1], 10, 0, 7); ctx.fill();
+        ctx.globalAlpha = alpha; ctx.fillStyle = '#fff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(head[0], head[1], 4.5, 0, 7); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function resolveFramePose(frame) {
+    if (!frame) return null;
+    let cur = strip(frame), acc = {x:0,y:0,yaw:0}, depth = 0;
+    while (cur !== CFG.mapFrame && depth++ < 16) {
+        const t = tfTree[cur]; if (!t) return null;
+        const c=Math.cos(t.yaw), s=Math.sin(t.yaw);
+        acc={x:t.x+c*acc.x-s*acc.y,y:t.y+s*acc.x+c*acc.y,yaw:t.yaw+acc.yaw}; cur=t.parent;
+    }
+    return cur===CFG.mapFrame ? acc : null;
+}
+function drawOccupancyOverlay(ctx, grid, rgba, threshold=1) {
+    if (!grid || !grid.data || !grid.w || !grid.h) return;
+    const maxCells = 180000, stride = Math.max(1, Math.ceil(Math.sqrt((grid.w*grid.h)/maxCells)));
+    const c=Math.cos(grid.yaw), s=Math.sin(grid.yaw);
+    ctx.save(); ctx.globalAlpha=1;
+    for(let y=0;y<grid.h;y+=stride){
+        for(let x=0;x<grid.w;x+=stride){
+            const v=grid.data[y*grid.w+x]; if(v<threshold || v<0) continue;
+            const wx=grid.ox+c*(x*grid.res)-s*(y*grid.res), wy=grid.oy+s*(x*grid.res)+c*(y*grid.res);
+            const p=w2s(wx,wy), p2=w2s(wx+c*stride*grid.res,wy+s*stride*grid.res);
+            const p3=w2s(wx-s*stride*grid.res,wy+c*stride*grid.res);
+            const sx=p2[0]-p[0], sy=p2[1]-p[1], tx=p3[0]-p[0], ty=p3[1]-p[1];
+            ctx.fillStyle=rgba.replace('ALPHA', String(Math.min(.55,.08+.45*v/100)));
+            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[0]+sx,p[1]+sy); ctx.lineTo(p[0]+sx+tx,p[1]+sy+ty); ctx.lineTo(p[0]+tx,p[1]+ty); ctx.closePath(); ctx.fill();
         }
     }
     ctx.restore();
+}
+function drawLaserScan(ctx) {
+    if (!showLaserScan || !latestScan || currentMode==='manual') return;
+    const base=resolveFramePose(latestScan.frame) || robot; if(!base) return;
+    const ranges=latestScan.ranges, step=Math.max(1,Math.ceil(ranges.length/1800));
+    ctx.save(); ctx.fillStyle='#0077ff'; ctx.globalAlpha=.78;
+    for(let i=0;i<ranges.length;i+=step){ const r=Number(ranges[i]); if(!Number.isFinite(r)||r<latestScan.rangeMin||r>latestScan.rangeMax) continue;
+        const a=latestScan.angleMin+i*latestScan.angleInc+base.yaw;
+        const wx=base.x+Math.cos(a)*r, wy=base.y+Math.sin(a)*r, p=w2s(wx,wy);
+        ctx.beginPath(); ctx.arc(p[0],p[1],1.5,0,Math.PI*2); ctx.fill();
+    } ctx.restore();
+}
+function drawNavEventBubble(ctx) {
+    if(!latestNavEvent || !robot || !latestNavEvent.text) return;
+    if((Date.now()/1000-Number(latestNavEvent.stamp||0))>9) return;
+    const p=w2s(robot.x,robot.y), wrap=document.getElementById('nav-event-bubble'); if(!wrap) return;
+    wrap.textContent=latestNavEvent.text; wrap.classList.add('show');
+    wrap.style.left=Math.max(8,Math.min(mapWrap.clientWidth-260,p[0]+18))+'px';
+    wrap.style.top=Math.max(8,p[1]-48)+'px';
+}
+function updateLayerUI(){
+    const card=document.getElementById('map-nav-card');
+    if(card) card.style.display=(currentMode==='nav'||currentMode==='slam_update')?'flex':'none';
+    const laser=document.getElementById('layer-laser');
+    if(laser){ laser.disabled=currentMode==='manual'; if(currentMode==='manual') laser.checked=false; }
+    if(currentMode==='manual') showLaserScan=false;
 }
 
 function drawMap() {
@@ -833,6 +778,10 @@ function drawMap() {
         ctx.restore();
     }
 
+    if (showGlobalCostmap && currentMode !== 'manual') drawOccupancyOverlay(ctx, latestGlobalCostmap, 'rgba(255,165,0,ALPHA)', 1);
+    if (showLocalCostmap && currentMode !== 'manual') drawOccupancyOverlay(ctx, latestLocalCostmap, 'rgba(0,200,120,ALPHA)', 1);
+    drawLaserScan(ctx);
+
     const step = view.s >= 6 ? 1 : (view.s >= 1.5 ? 5 : 10);
     document.getElementById('map-grid-label').textContent = 'Grid ' + step + ' m';
     const a = s2w(0, 0), b = s2w(W, H);
@@ -846,8 +795,6 @@ function drawMap() {
         const sx = Math.round(w2s(0, y)[0]) + 0.5; ctx.moveTo(sx, 0); ctx.lineTo(sx, H);
     }
     ctx.stroke();
-
-    drawLaserScan(ctx);
 
     const o = w2s(0, 0), ax = w2s(1, 0), ay = w2s(0, 1);
     ctx.lineWidth = 2;
@@ -937,6 +884,8 @@ function drawMap() {
 
         ctx.restore();
     }
+    drawNavEventBubble(ctx);
+    if (!latestNavEvent || !robot || (Date.now()/1000-Number(latestNavEvent.stamp||0))>9) { const b=document.getElementById('nav-event-bubble'); if(b) b.classList.remove('show'); }
 }
 
 function evtPos(evt) { const r = mapCanvas.getBoundingClientRect(); return [evt.clientX - r.left, evt.clientY - r.top]; }
@@ -1263,144 +1212,22 @@ async function sendAbort() {
     }
     catch (e) { notify('ERROR', 'Failed to abort mission: ' + e.message); }
 }
-let availableMaps = [];
-let mapsLoading = false;
-
-async function fetchMaps(options = {}) {
-    if (mapsLoading) return;
-    const select = document.getElementById('map-name-select');
-    if (!select) return;
-
-    // The rover IP is entered in the connection dialog and stored in localStorage.
-    // Do not try to fetch before that value exists: otherwise the browser attempts
-    // to call http://:8000/maps during the very first page load.
-    if (!ROVER_HOST) {
-        select.disabled = true;
-        select.innerHTML = '<option value="">Connect to rover to load maps</option>';
-        return;
-    }
-
-    mapsLoading = true;
-    try {
-        const ctl = new AbortController();
-        const to = setTimeout(() => ctl.abort(), 5000);
-        const r = await fetch('http://' + ROVER_HOST + ':8000/maps?t=' + Date.now(), {
-            cache: 'no-store',
-            signal: ctl.signal,
-            headers: { 'Accept': 'application/json' }
-        });
-        clearTimeout(to);
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-
-        const data = await r.json();
-        if (!Array.isArray(data.maps)) throw new Error('Invalid /maps response');
-        availableMaps = data.maps;
-
-        const previous = select.value;
-        select.innerHTML = '';
-
-        if (!availableMaps.length) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = 'No saved maps';
-            select.appendChild(opt);
-        } else {
-            availableMaps.forEach(name => {
-                const opt = document.createElement('option');
-                opt.value = name;
-                opt.textContent = name;
-                select.appendChild(opt);
-            });
-            if (availableMaps.includes(previous)) {
-                select.value = previous;
-            } else {
-                select.selectedIndex = 0;
-            }
-        }
-
-        select.disabled = false;
-        select.dataset.loaded = 'true';
-        updateMapButtons();
-        if (options.notifySuccess) notify('INFO', 'Loaded ' + availableMaps.length + ' saved map(s).');
-    } catch (e) {
-        select.innerHTML = '<option value="">Unable to load maps</option>';
-        select.disabled = false;
-        if (options.notifyError !== false) {
-            notify('WARNING', 'Could not fetch saved maps: ' + (e.name === 'AbortError' ? 'request timed out' : e.message));
-        }
-    } finally {
-        mapsLoading = false;
-    }
-}
-
-function openMapSaveModal() {
-    if (!ROVER_HOST) return notify('WARNING', 'Connect to the rover before saving a map.');
-    const modal = document.getElementById('map-save-modal');
-    const input = document.getElementById('save-map-name');
-    const error = document.getElementById('map-save-error');
-    const select = document.getElementById('map-name-select');
-    if (error) error.textContent = '';
-    if (input) input.value = select && select.value && availableMaps.includes(select.value) ? select.value : '';
-    if (modal) modal.hidden = false;
-    setTimeout(() => input && input.focus(), 30);
-}
-
-function closeMapSaveModal() {
-    const modal = document.getElementById('map-save-modal');
-    if (modal) modal.hidden = true;
-}
-
-function setMapSaveError(message) {
-    const el = document.getElementById('map-save-error');
-    if (el) el.textContent = message;
-}
-
-async function saveMapFromModal() {
-    const input = document.getElementById('save-map-name');
-    const submit = document.getElementById('save-map-submit');
-    const mapName = (input ? input.value : '').trim();
-    setMapSaveError('');
-
-    if (!mapName) return setMapSaveError('Enter a map name.');
-    if (!/^[A-Za-z0-9 _.-]+$/.test(mapName) || mapName === '.' || mapName === '..') {
-        return setMapSaveError('Use only letters, numbers, spaces, _, -, and . in the map name.');
-    }
-
-    if (submit) { submit.disabled = true; submit.classList.add('loading'); }
-    try {
-        await postJSON('/system/save_map', { map_name: mapName });
-        closeMapSaveModal();
-        notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…');
-        setTimeout(async () => {
-            await fetchMaps({ notifyError: false });
-            const select = document.getElementById('map-name-select');
-            if (select && availableMaps.includes(mapName)) select.value = mapName;
-            updateMapButtons();
-        }, 1500);
-    } catch (e) {
-        setMapSaveError('Failed to save map: ' + e.message);
-    } finally {
-        if (submit) { submit.disabled = false; submit.classList.remove('loading'); }
-    }
-}
-
-// Backward-compatible entry point for any existing callers.
 async function saveCurrentMap() {
-    openMapSaveModal();
+    const mapName = document.getElementById('map-name-input').value;
+    if (!mapName) return notify('WARNING', 'Please enter a map name to save.');
+    try { await postJSON('/system/save_map', { map_name: mapName }); notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…'); }
+    catch (e) { notify('ERROR', 'Failed to save map: ' + e.message); }
 }
 
 let currentMode = null, pending = null, modeSelectTouched = false, modeTimer = null, polling = false;
 
 function normalizeMode(raw) {
     if (raw === undefined || raw === null) return null;
-    const s = String(raw).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-    if (['slam_update', 'slam_update_nav', 'autonomous_driving_map_update', 'autonomous_map_update',
-         'mapping_navigation_update'].includes(s)) return 'slam_update';
-    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization',
-         'autonomous_driving_fixed_map', 'fixed_map', 'autonomous_fixed_map'].includes(s)) return 'nav';
-    if (['slam', 'slam_only', 'mapping', 'mapping_only', 'manual_mapping',
-         'manual_driving_new_mapping', 'new_mapping'].includes(s)) return 'slam';
-    if (['manual', 'teleop', 'joystick', 'manual_driving_mapping_off', 'manual_mapping_off'].includes(s)) return 'manual';
+    const s = String(raw).toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, '');
+    if (['slam_update', 'slam_update_nav', 'continued_mapping', 'lifelong_mapping', 'lifelong'].includes(s)) return 'slam_update';
+    if (['slam', 'slam_only', 'mapping', 'mapping_only'].includes(s)) return 'slam';
+    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization'].includes(s)) return 'nav';
+    if (['manual', 'teleop', 'joystick'].includes(s)) return 'manual';
     return null;
 }
 
@@ -1421,13 +1248,6 @@ async function fetchMode() {
     finally { clearTimeout(to); }
 }
 
-function renderNavCardVisibility() {
-    const card = document.getElementById('map-nav-card');
-    if (!card) return;
-    const autonomous = currentMode === 'nav' || currentMode === 'slam_update';
-    card.classList.toggle('mode-hidden', !autonomous);
-}
-
 function renderMode() {
     const chip = document.getElementById('mode-chip'), txt = document.getElementById('stat-mode');
     const btn = document.getElementById('deploy-btn');
@@ -1444,8 +1264,6 @@ function renderMode() {
     btn.disabled = !!pending;
     btn.classList.toggle('loading', !!pending);
 
-    renderNavCardVisibility();
-
     document.querySelectorAll('.mode-loader').forEach(el => {
         el.classList.toggle('show', !!pending);
         if (pending) el.querySelector('.ml-title').textContent = 'Switching to ' + MODE_LABELS[pending.target];
@@ -1454,6 +1272,7 @@ function renderMode() {
 
 function setCurrentMode(m) {
     currentMode = m;
+    updateLayerUI();
     if (m && !modeSelectTouched && !pending) document.getElementById('sys-mode-select').value = m;
     renderMode();
 }
@@ -1491,7 +1310,7 @@ function scheduleModePoll() {
 async function applySystemMode() {
     if (pending) return;
     const mode = document.getElementById('sys-mode-select').value;
-    const mapName = document.getElementById('map-name-select').value || '';
+    const mapName = document.getElementById('map-name-input').value || 'small_warehouse';
     if (mode === currentMode) return notify('INFO', 'Already in ' + MODE_LABELS[mode] + ' mode.');
 
     const p = { target: mode, timer: null };
@@ -1519,67 +1338,17 @@ async function applySystemMode() {
 }
 
 const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
-const joyEnableBtn = document.getElementById('joy-enable-btn');
-const joy = { x: 0, y: 0, active: false, enabled: false, timer: null };
+const joy = { x: 0, y: 0, active: false, timer: null };
 
 function publishJoy() {
     if (!joyTopic || rosState !== 'up') return;
     const ms = Date.now();
-    const msg = new ROSLIB.Message({
+    joyTopic.publish(new ROSLIB.Message({
         header: { stamp: { sec: Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 }, frame_id: 'joy' },
-        // ROS convention used by the rover:
-        // axes[1] = forward/backward, axes[0] = left/right rotation.
-        // Up/forward on the web joystick gives +linear. Right/clockwise gives -angular.
         axes: [-joy.x, -joy.y, 0, 0, 0, 0, 0, 0],
-        // Button index 4 is the enable/dead-man button expected by the rover.
-        buttons: [0, 0, 0, 0, joy.enabled ? 1 : 0, 0, 0, 0, 0, 0, 0, 0]
-    });
-    joyTopic.publish(msg);
+        buttons: new Array(12).fill(0)
+    }));
 }
-
-function startJoyPublishing() {
-    clearInterval(joy.timer);
-    if (!joy.enabled) return;
-    joy.timer = setInterval(publishJoy, 1000 / CFG.joyRateHz);
-    publishJoy();
-}
-
-function stopJoyPublishing() {
-    clearInterval(joy.timer);
-    joy.timer = null;
-}
-
-function updateJoyEnableButton() {
-    if (!joyEnableBtn) return;
-    joyEnableBtn.textContent = joy.enabled ? 'Disable' : 'Enable';
-    joyEnableBtn.classList.toggle('enabled', joy.enabled);
-    joyEnableBtn.classList.toggle('btn-success', !joy.enabled);
-    joyEnableBtn.classList.toggle('btn-danger', joy.enabled);
-    joyEnableBtn.setAttribute('aria-pressed', joy.enabled ? 'true' : 'false');
-}
-
-function toggleJoyEnabled() {
-    joy.enabled = !joy.enabled;
-    if (!joy.enabled) {
-        joy.x = 0; joy.y = 0;
-        joyShow();
-    }
-    updateJoyEnableButton();
-    if (joy.enabled) {
-        startJoyPublishing();
-        notify('INFO', 'Joystick enabled. Publishing sensor_msgs/Joy on /joy with button[4] pressed.');
-    } else {
-        // Send a final disabled/dead-man message so the rover's button[4] gate stops the robot.
-        if (joyTopic && rosState === 'up') {
-            publishJoy();
-            setTimeout(publishJoy, 50);
-            setTimeout(publishJoy, 100);
-        }
-        stopJoyPublishing();
-        notify('INFO', 'Joystick disabled.');
-    }
-}
-
 function joyShow() {
     joyKnob.style.transform = 'translate(' + (joy.x * joyR()) + 'px,' + (joy.y * joyR()) + 'px)';
     document.getElementById('joy-x').textContent = (-joy.x).toFixed(2);
@@ -1592,35 +1361,30 @@ function joyMove(evt) {
     const mag = Math.hypot(dx, dy);
     if (mag > R) { dx *= R / mag; dy *= R / mag; }
     joy.x = dx / R; joy.y = dy / R; joyShow();
-    if (joy.enabled) publishJoy();
 }
 joyPad.addEventListener('pointerdown', (e) => {
-    if (!joy.enabled) {
-        notify('WARNING', 'Enable the joystick before driving.');
-        return;
-    }
     joyPad.setPointerCapture(e.pointerId); joyPad.classList.add('active');
     joy.active = true; joyMove(e);
+    clearInterval(joy.timer);
+    joy.timer = setInterval(publishJoy, 1000 / CFG.joyRateHz);
+    publishJoy();
 });
-joyPad.addEventListener('pointermove', (e) => { if (joy.active && joy.enabled) joyMove(e); });
+joyPad.addEventListener('pointermove', (e) => { if (joy.active) joyMove(e); });
 const joyEnd = () => {
     if (!joy.active) return;
     joy.active = false; joyPad.classList.remove('active');
+    clearInterval(joy.timer);
     joy.x = 0; joy.y = 0; joyShow();
-    if (joy.enabled) {
-        publishJoy(); setTimeout(publishJoy, 50); setTimeout(publishJoy, 100);
-    }
+    publishJoy(); setTimeout(publishJoy, 50); setTimeout(publishJoy, 100);
 };
 joyPad.addEventListener('pointerup', joyEnd);
 joyPad.addEventListener('pointercancel', joyEnd);
-updateJoyEnableButton();
 
 (function init() {
     let saved = null;
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');
     renderMode();
-    if (ROVER_HOST) fetchMaps({ notifyError: false });
     pollMode().then(scheduleModePoll);
     requestAnimationFrame(frame);
 })();
@@ -1790,21 +1554,13 @@ function connectHelioWebSocket() {
 function handleHelioSocketEvent(data) {
     if (data.conversation_id) helioConversationId = data.conversation_id;
     switch (data.type) {
-        case 'session': setAgentConnectionState(true, 'Ready'); appendAgentEvent('status', 'Conversation started.', data.conversation_id); break;
-        case 'status': {
-            const stage = String(data.stage || 'status').toLowerCase();
-            const liveLabel = stage === 'thinking' ? 'Thinking' : stage === 'tool_running' ? 'Using tool' : stage === 'listening' ? 'Listening' : stage === 'speaking' ? 'Speaking' : 'Working';
-            setAgentConnectionState(true, liveLabel);
-            appendAgentEvent(data.stage || 'status', data.message || '');
-            if (data.stage === 'thinking') setRobotMood('thinking', 'Thinking', data.message || 'Processing…');
-            else if (data.stage === 'tool_running') setRobotMood('thinking', 'Using tool', data.message || 'Accessing rover…');
-            break;
-        }
-        case 'model': setAgentConnectionState(true, data.message || 'Helio'); appendAgentEvent('model', data.message || ''); break;
-        case 'tool_call': setAgentConnectionState(true, 'Using tool'); appendAgentEvent('tool-call', `${data.tool || 'tool'}()`, data.inputs || {}); setRobotMood('thinking', 'Using tool', `Calling ${data.tool || 'tool'}…`); break;
-        case 'tool_result': setAgentConnectionState(true, 'Working'); appendAgentEvent('tool-result', `${data.tool || 'tool'} completed`, data.result); break;
-        case 'final': { setAgentConnectionState(true, 'Speaking'); stopThinkingIndicator(); const finalText = data.output || "I didn't receive a valid response."; appendHistory('agent', finalText); speakAndLoop(finalText); break; }
-        case 'error': stopThinkingIndicator(); setAgentConnectionState(true, 'Ready'); appendAgentEvent('error', data.message || 'Unknown Helio error.'); setRobotMood('listening', 'Ready', data.message || 'I ran into a problem.'); break;
+        case 'session': appendAgentEvent('status', 'Conversation started.', data.conversation_id); break;
+        case 'status': appendAgentEvent(data.stage || 'status', data.message || ''); if (data.stage === 'thinking') setRobotMood('thinking', 'Thinking', data.message || 'Processing…'); else if (data.stage === 'tool_running') setRobotMood('thinking', 'Using tool', data.message || 'Accessing rover…'); break;
+        case 'model': appendAgentEvent('model', data.message || ''); break;
+        case 'tool_call': appendAgentEvent('tool-call', `${data.tool || 'tool'}()`, data.inputs || {}); setRobotMood('thinking', 'Using tool', `Calling ${data.tool || 'tool'}…`); break;
+        case 'tool_result': appendAgentEvent('tool-result', `${data.tool || 'tool'} completed`, data.result); break;
+        case 'final': { stopThinkingIndicator(); const finalText = data.output || "I didn't receive a valid response."; appendHistory('agent', finalText); speakAndLoop(finalText); break; }
+        case 'error': stopThinkingIndicator(); appendAgentEvent('error', data.message || 'Unknown Helio error.'); setRobotMood('listening', 'Ready', data.message || 'I ran into a problem.'); break;
     }
 }
 function closeHelioWebSocket() { helioSocketClosing = true; if (helioSocket) { try { helioSocket.close(1000, 'Helio closed by user'); } catch(e) {} } helioSocket = null; helioSocketPromise = null; helioConversationId = null; setAgentConnectionState(false, 'Offline'); }
@@ -1857,7 +1613,7 @@ if (SpeechRecognitionImpl) {
 
     recognition.onstart = () => {
         agentState = 'listening'; committed = false; heardSpeech = false; lastText = '';
-        listenStartedAt = Date.now(); listenDeadline = 0; setRobotMood('listening', 'Listening', 'Speak your command...'); setAgentConnectionState(true, 'Listening'); playListenSound(); clearListenTimers();
+        listenStartedAt = Date.now(); listenDeadline = 0; setRobotMood('listening', 'Listening', 'Speak your command...'); playListenSound(); clearListenTimers();
     };
 
     recognition.onerror = (e) => {
@@ -1910,15 +1666,7 @@ if (SpeechRecognitionImpl) {
 
 function setRobotMood(className, statusMsg, captionMsg) {
     robotFace.className = 'robot-face ' + className;
-    if (statusMsg !== null) {
-        captionStatus.textContent = statusMsg;
-        const live = document.getElementById('agent-connection-state');
-        if (live && modal && modal.classList.contains('active')) {
-            const compact = statusMsg === 'Helio' || statusMsg === 'Response' || statusMsg === 'Ready' ? statusMsg : statusMsg;
-            live.textContent = compact;
-            live.classList.add('connected');
-        }
-    }
+    if (statusMsg !== null) captionStatus.textContent = statusMsg;
     if (captionMsg !== null) {
         captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
     }
@@ -1983,7 +1731,6 @@ function speakAndLoop(text) {
             if (modal.classList.contains('active')) {
                 agentState = 'listening';
                 setRobotMood('listening', 'Listening', 'Listening for next command...');
-                setAgentConnectionState(true, 'Listening');
                 startRecognition();
             }
         };
@@ -2245,252 +1992,3 @@ function setLang(lang) {
     document.getElementById('btn-en').classList.toggle('active', !isHi);
     document.getElementById('btn-hi').classList.toggle('active', isHi);
 }
-// ==================== MAP MANAGEMENT ====================
-function mapApiUrl(path) {
-    return 'http://' + ROVER_HOST + ':8000' + path;
-}
-
-function updateMapButtons() {
-    const select = document.getElementById('map-name-select');
-    const name = select ? select.value.trim() : '';
-    const valid = !!name && availableMaps.includes(name);
-    const view = document.getElementById('view-map-btn');
-    const del = document.getElementById('delete-map-btn');
-    if (view) view.disabled = !valid;
-    if (del) del.disabled = !valid;
-}
-
-function openMapAddModal() {
-    if (!ROVER_HOST) return notify('WARNING', 'Connect to the rover before adding a map.');
-    const modal = document.getElementById('map-add-modal');
-    const name = document.getElementById('new-map-name');
-    const pgm = document.getElementById('new-map-pgm');
-    const yaml = document.getElementById('new-map-yaml');
-    const err = document.getElementById('map-add-error');
-    if (name) name.value = '';
-    if (pgm) pgm.value = '';
-    if (yaml) yaml.value = '';
-    if (err) err.textContent = '';
-    if (modal) modal.hidden = false;
-    setTimeout(() => name && name.focus(), 30);
-}
-
-function closeMapAddModal() {
-    const modal = document.getElementById('map-add-modal');
-    if (modal) modal.hidden = true;
-}
-
-function closeMapPreview() {
-    const modal = document.getElementById('map-preview-modal');
-    if (modal) modal.hidden = true;
-    const canvas = document.getElementById('map-preview-canvas');
-    if (canvas) { canvas.width = 1; canvas.height = 1; }
-}
-
-async function addMapFromFiles() {
-    const nameEl = document.getElementById('new-map-name');
-    const pgmEl = document.getElementById('new-map-pgm');
-    const yamlEl = document.getElementById('new-map-yaml');
-    const errEl = document.getElementById('map-add-error');
-    const submit = document.getElementById('add-map-submit');
-    const name = (nameEl ? nameEl.value : '').trim();
-    const pgm = pgmEl && pgmEl.files ? pgmEl.files[0] : null;
-    const yaml = yamlEl && yamlEl.files ? yamlEl.files[0] : null;
-
-    if (errEl) errEl.textContent = '';
-    if (!name) return setMapAddError('Enter a map name.');
-    if (!/^[A-Za-z0-9 _.-]+$/.test(name) || name === '.' || name === '..') {
-        return setMapAddError('Use only letters, numbers, spaces, _, -, and . in the map name.');
-    }
-    if (!pgm || !yaml) return setMapAddError('Select both a PGM file and a YAML file.');
-    if (!/\.pgm$/i.test(pgm.name)) return setMapAddError('The image file must be a .pgm file.');
-    if (!/\.ya?ml$/i.test(yaml.name)) return setMapAddError('The metadata file must be a .yaml or .yml file.');
-
-    if (submit) { submit.disabled = true; submit.classList.add('loading'); }
-    let created = false;
-    try {
-        let r = await fetch(mapApiUrl('/maps'), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ map_name: name })
-        });
-        if (!r.ok) throw new Error(await responseError(r));
-        created = true;
-
-        r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/pgm'), {
-            method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' },
-            body: await pgm.arrayBuffer()
-        });
-        if (!r.ok) throw new Error(await responseError(r));
-
-        r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/yaml'), {
-            method: 'PUT', headers: { 'Content-Type': 'text/yaml; charset=utf-8' },
-            body: await yaml.text()
-        });
-        if (!r.ok) throw new Error(await responseError(r));
-
-        closeMapAddModal();
-        notify('INFO', 'Map "' + name + '" added successfully.');
-        await fetchMaps({ notifyError: true });
-        const select = document.getElementById('map-name-select');
-        if (select && availableMaps.includes(name)) select.value = name;
-        updateMapButtons();
-    } catch (e) {
-        if (created) {
-            try { await fetch(mapApiUrl('/maps/' + encodeURIComponent(name)), { method: 'DELETE' }); } catch (_) {}
-        }
-        setMapAddError(e.message || 'Failed to add map.');
-    } finally {
-        if (submit) { submit.disabled = false; submit.classList.remove('loading'); }
-    }
-}
-
-function setMapAddError(message) {
-    const el = document.getElementById('map-add-error');
-    if (el) el.textContent = message;
-}
-
-async function responseError(r) {
-    let message = 'HTTP ' + r.status;
-    try {
-        const data = await r.json();
-        if (data && data.detail) message = data.detail;
-    } catch (_) {}
-    return message;
-}
-
-async function deleteSelectedMap() {
-    const select = document.getElementById('map-name-select');
-    const name = select ? select.value.trim() : '';
-    if (!name || !availableMaps.includes(name)) return;
-    if (!window.confirm('Delete map "' + name + '" and all of its files? This cannot be undone.')) return;
-
-    const btn = document.getElementById('delete-map-btn');
-    if (btn) { btn.disabled = true; btn.classList.add('loading'); }
-    try {
-        const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name)), { method: 'DELETE' });
-        if (!r.ok) throw new Error(await responseError(r));
-        notify('INFO', 'Map "' + name + '" deleted.');
-        await fetchMaps({ notifyError: true });
-        updateMapButtons();
-    } catch (e) {
-        notify('ERROR', 'Failed to delete map: ' + e.message);
-        updateMapButtons();
-    } finally {
-        if (btn) btn.classList.remove('loading');
-    }
-}
-
-async function openSelectedMapPreview() {
-    const select = document.getElementById('map-name-select');
-    const name = select ? select.value.trim() : '';
-    if (!name || !availableMaps.includes(name)) return;
-
-    const modal = document.getElementById('map-preview-modal');
-    const title = document.getElementById('map-preview-title');
-    const meta = document.getElementById('map-preview-meta');
-    const loading = document.getElementById('map-preview-loading');
-    const error = document.getElementById('map-preview-error');
-    const canvas = document.getElementById('map-preview-canvas');
-    if (!modal || !canvas) return;
-
-    title.textContent = name;
-    meta.textContent = 'PGM occupancy image — loading…';
-    error.textContent = '';
-    loading.hidden = false;
-    canvas.hidden = true;
-    modal.hidden = false;
-
-    try {
-        const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(name) + '/pgm?t=' + Date.now()), { cache: 'no-store' });
-        if (!r.ok) throw new Error(await responseError(r));
-        const buffer = await r.arrayBuffer();
-        const info = renderPgmToCanvas(buffer, canvas);
-        loading.hidden = true;
-        canvas.hidden = false;
-        meta.textContent = info.width + ' × ' + info.height + ' px · PGM ' + info.magic;
-    } catch (e) {
-        loading.hidden = true;
-        error.textContent = 'Could not load PGM: ' + e.message;
-    }
-}
-
-function renderPgmToCanvas(buffer, canvas) {
-    const bytes = new Uint8Array(buffer);
-    let pos = 0;
-
-    function nextToken() {
-        while (pos < bytes.length) {
-            const c = bytes[pos];
-            if (c === 35) { // # comment
-                while (pos < bytes.length && bytes[pos] !== 10 && bytes[pos] !== 13) pos++;
-            } else if (c <= 32) {
-                pos++;
-            } else break;
-        }
-        const start = pos;
-        while (pos < bytes.length && bytes[pos] > 32 && bytes[pos] !== 35) pos++;
-        return new TextDecoder().decode(bytes.subarray(start, pos));
-    }
-
-    const magic = nextToken();
-    if (magic !== 'P2' && magic !== 'P5') throw new Error('Unsupported PGM format ' + magic);
-    const width = Number(nextToken()), height = Number(nextToken()), maxval = Number(nextToken());
-    if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(maxval) || width <= 0 || height <= 0 || maxval <= 0 || maxval > 65535) {
-        throw new Error('Invalid PGM header');
-    }
-
-    const count = width * height;
-    const pixels = new Uint8ClampedArray(count);
-    if (magic === 'P2') {
-        for (let i = 0; i < count; i++) {
-            const v = Number(nextToken());
-            if (!Number.isFinite(v)) throw new Error('PGM pixel data is incomplete');
-            pixels[i] = Math.max(0, Math.min(255, Math.round(v * 255 / maxval)));
-        }
-    } else {
-        // P5 pixel data begins after one whitespace character following maxval.
-        while (pos < bytes.length && bytes[pos] <= 32) pos++;
-        if (maxval <= 255) {
-            if (bytes.length - pos < count) throw new Error('PGM pixel data is incomplete');
-            for (let i = 0; i < count; i++) pixels[i] = Math.round(bytes[pos + i] * 255 / maxval);
-        } else {
-            if (bytes.length - pos < count * 2) throw new Error('PGM pixel data is incomplete');
-            for (let i = 0; i < count; i++) {
-                const v = (bytes[pos + i * 2] << 8) | bytes[pos + i * 2 + 1];
-                pixels[i] = Math.round(v * 255 / maxval);
-            }
-        }
-    }
-
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    const image = ctx.createImageData(width, height);
-    for (let i = 0, j = 0; i < count; i++, j += 4) {
-        const v = pixels[i];
-        image.data[j] = v; image.data[j + 1] = v; image.data[j + 2] = v; image.data[j + 3] = 255;
-    }
-    ctx.putImageData(image, 0, 0);
-    return { width, height, magic };
-}
-
-window.openMapAddModal = openMapAddModal;
-window.closeMapAddModal = closeMapAddModal;
-window.openMapSaveModal = openMapSaveModal;
-window.closeMapSaveModal = closeMapSaveModal;
-window.saveMapFromModal = saveMapFromModal;
-window.addMapFromFiles = addMapFromFiles;
-window.openSelectedMapPreview = openSelectedMapPreview;
-window.closeMapPreview = closeMapPreview;
-window.deleteSelectedMap = deleteSelectedMap;
-window.updateMapButtons = updateMapButtons;
-
-document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape') return;
-    const add = document.getElementById('map-add-modal');
-    const save = document.getElementById('map-save-modal');
-    const preview = document.getElementById('map-preview-modal');
-    if (add && !add.hidden) closeMapAddModal();
-    if (save && !save.hidden) closeMapSaveModal();
-    if (preview && !preview.hidden) closeMapPreview();
-});
