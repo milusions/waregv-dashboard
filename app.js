@@ -27,7 +27,7 @@ const CFG = {
     jointOrder: ['fl', 'fr', 'bl', 'br'],   // actual: left<->right swapped vs original
     jointOverrides: {},
     modeUrl: '/system/mode',
-    modeTimeoutMs: 40000,
+    modeTimeoutMs: 120000,  // Updated to 2 minutes (120000 ms) for autonomous/system mode switches
     modePollMs: 1000,
     modeIdlePollMs: 5000,
     chartWindowSec: 30,
@@ -1728,9 +1728,15 @@ function joyMove(evt) {
     const r = joyPad.getBoundingClientRect(), R = joyR();
     let dx = evt.clientX - (r.left + r.width / 2), dy = evt.clientY - (r.top + r.height / 2);
     const mag = Math.hypot(dx, dy);
+    
     if (mag > R) { dx *= R / mag; dy *= R / mag; }
+    
+    // Add a 10% deadzone to eliminate resting noise
+    if (mag < R * 0.1) { dx = 0; dy = 0; }
+    
     joy.x = dx / R; joy.y = dy / R; joyShow();
-    if (joy.enabled) publishJoy();
+    
+    // Removed immediate publishJoy() to prevent network flooding
 }
 joyPad.addEventListener('pointerdown', (e) => {
     if (!joy.enabled) {
