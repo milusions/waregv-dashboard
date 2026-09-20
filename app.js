@@ -356,12 +356,16 @@ function subscribeAll() {
     subs = [];
     const T = CFG.topics;
 
+    const mkT = (name, type, opts, cb) => {
+        const t = new ROSLIB.Topic(Object.assign({ ros, name, messageType: type }, opts));
+        t.subscribe(cb); subs.push(t); return t;
+    };
     const mk = (name, type, cb) => {
         const t = new ROSLIB.Topic({ ros, name, messageType: type });
         t.subscribe(cb); subs.push(t); return t;
     };
 
-    mk(T.map, 'nav_msgs/OccupancyGrid', (m) => {
+    mkT(T.map, 'nav_msgs/OccupancyGrid', { throttle_rate: 500, queue_length: 1 }, (m) => {
         latestMap = {
             w: m.info.width, h: m.info.height, res: m.info.resolution,
             ox: m.info.origin.position.x, oy: m.info.origin.position.y,
@@ -429,10 +433,8 @@ function subscribeAll() {
         needsDraw = true;
     });
 
-    mk(T.gcost, 'nav_msgs/OccupancyGrid', (m) => onCostmap('gcost', m));
-    mk(T.lcost, 'nav_msgs/OccupancyGrid', (m) => onCostmap('lcost', m));
-    mk(T.gcostUpd, 'map_msgs/OccupancyGridUpdate', (m) => onCostmapUpdate('gcost', m));
-    mk(T.lcostUpd, 'map_msgs/OccupancyGridUpdate', (m) => onCostmapUpdate('lcost', m));
+    mkT(T.gcost, 'nav_msgs/OccupancyGrid', { throttle_rate: 1500, queue_length: 1 }, (m) => layerOn('gcost') && onCostmap('gcost', m));
+    mkT(T.lcost, 'nav_msgs/OccupancyGrid', { throttle_rate: 1000, queue_length: 1 }, (m) => layerOn('lcost') && onCostmap('lcost', m));
     subs.push((() => { const t = new ROSLIB.Topic({ ros, name: T.rosout, messageType: 'rcl_interfaces/msg/Log', queue_length: 200 });
         t.subscribe(onRosout); return t; })());
 
@@ -957,8 +959,8 @@ function drawMap() {
         ctx.restore();
     }
 
-    const step = view.s >= 6 ? 1 : (view.s >= 1.5 ? 5 : 10);
-    document.getElementById('map-grid-label').textContent = 'Grid ' + step + ' m';
+    const step = view.s >= 6 ? 0.6 : (view.s >= 1.5 ? 3.0 : 6.0);   // 60 cm cells (coarser multiples when zoomed out)
+    document.getElementById('map-grid-label').textContent = 'Grid ' + Math.round(step * 100) + ' cm';
     const a = s2w(0, 0), b = s2w(W, H);
     const xLo = Math.min(a.x, b.x), xHi = Math.max(a.x, b.x), yLo = Math.min(a.y, b.y), yHi = Math.max(a.y, b.y);
     ctx.strokeStyle = theme['--map-grid']; ctx.lineWidth = 1;
