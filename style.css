@@ -1297,3 +1297,9 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     .map-manage-row .btn { flex:1 1 30%; }
     .map-preview-body { min-height:280px; }
 }
+
+.layer-legend{position:absolute;left:10px;bottom:10px;z-index:5;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;opacity:.94;user-select:none}
+.ll-title{font-weight:700;margin-bottom:3px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.ll-row{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;color:var(--text)}
+.ll-row.dis{opacity:.4;cursor:not-allowed}
+.ll-row i{width:10px;height:10px;border-radius:2px;display:inline-block}

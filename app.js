@@ -13,7 +13,12 @@ const CFG = {
         cmdVel: '/cmd_vel',
         joy: '/joy',
         camera: '/camera/image_raw',
-        scan: '/scan'
+        scan: '/scan',
+        gcost: '/global_costmap/costmap',
+        gcostUpd: '/global_costmap/costmap_updates',
+        lcost: '/local_costmap/costmap',
+        lcostUpd: '/local_costmap/costmap_updates',
+        rosout: '/rosout'
     },
     mapFrame: 'map',
     baseFrames: ['base_link', 'base_footprint'],
@@ -103,6 +108,118 @@ let odom = null;
 let robot = null;
 let latestScan = null;
 let showLaserScan = true;
+
+// ---------- Layers legend ----------
+const layers = { map: true, scan: true, gcost: true, lcost: true, plan: true };
+const LAYER_DEFS = [
+    ['map',   'Map',            '#8a8f98'],
+    ['scan',  'Laser scan',     '#3b82f6'],
+    ['gcost', 'Global costmap', '#e879f9'],
+    ['lcost', 'Local costmap',  '#f59e0b'],
+    ['plan',  'Path / goal',    '#22c55e']
+];
+const COST_ONLY = { scan: 1, gcost: 1, lcost: 1, plan: 1 };   // hidden in plain manual mode
+function layerOn(k) {
+    if (typeof currentMode !== 'undefined' && currentMode === 'manual' && COST_ONLY[k]) return false;
+    return !!layers[k];
+}
+function toggleLayer(k) { layers[k] = !layers[k]; showLaserScan = layers.scan; updateLegend(); needsDraw = true; }
+function updateLegend() {
+    const box = document.getElementById('layer-legend'); if (!box) return;
+    box.innerHTML = '<div class="ll-title">Layers</div>' + LAYER_DEFS.map(([k, label, col]) => {
+        const dis = (typeof currentMode !== 'undefined' && currentMode === 'manual' && COST_ONLY[k]);
+        return '<label class="ll-row' + (dis ? ' dis' : '') + '"><input type="checkbox" ' +
+            (layers[k] && !dis ? 'checked ' : '') + (dis ? 'disabled ' : '') +
+            'onchange="toggleLayer(\'' + k + '\')"><i style="background:' + col + '"></i>' + label + '</label>';
+    }).join('');
+}
+
+// ---------- Costmaps ----------
+const costmaps = {
+    gcost: { g: null, cv: document.createElement('canvas'), dirty: false },
+    lcost: { g: null, cv: document.createElement('canvas'), dirty: false }
+};
+const COST_LUT = (() => {
+    const a = new Uint8ClampedArray(101 * 4);
+    for (let v = 1; v <= 100; v++) {
+        const t = v / 100, k = v * 4;
+        a[k] = 60 + 195 * t; a[k + 1] = 200 * (1 - t) * (1 - t); a[k + 2] = 255 - 120 * t;
+        a[k + 3] = v >= 99 ? 200 : 60 + 110 * t;
+    }
+    return a;
+})();
+function onCostmap(key, m) {
+    costmaps[key].g = {
+        w: m.info.width, h: m.info.height, res: m.info.resolution,
+        ox: m.info.origin.position.x, oy: m.info.origin.position.y,
+        yaw: quatYaw(m.info.origin.orientation), data: m.data
+    };
+    costmaps[key].dirty = true; needsDraw = true;
+}
+function onCostmapUpdate(key, u) {
+    const g = costmaps[key].g; if (!g) return;
+    for (let r = 0; r < u.height; r++) {
+        const dst = (u.y + r) * g.w + u.x, src = r * u.width;
+        for (let c = 0; c < u.width; c++) g.data[dst + c] = u.data[src + c];
+    }
+    costmaps[key].dirty = true; needsDraw = true;
+}
+function rebuildCostmap(key) {
+    const cm = costmaps[key], g = cm.g; if (!g) return;
+    cm.cv.width = g.w; cm.cv.height = g.h;
+    const ctx = cm.cv.getContext('2d'), img = ctx.createImageData(g.w, g.h), d = img.data;
+    for (let i = 0, n = g.w * g.h; i < n; i++) {
+        let v = g.data[i]; if (v <= 0) continue; if (v > 100) v = 100;
+        const k = i * 4, l = v * 4;
+        d[k] = COST_LUT[l]; d[k + 1] = COST_LUT[l + 1]; d[k + 2] = COST_LUT[l + 2]; d[k + 3] = COST_LUT[l + 3];
+    }
+    ctx.putImageData(img, 0, 0); cm.dirty = false;
+}
+function drawCostmap(ctx, key) {
+    const cm = costmaps[key], g = cm.g; if (!g) return;
+    if (cm.dirty) rebuildCostmap(key);
+    const c = Math.cos(g.yaw), s = Math.sin(g.yaw), k = g.res * view.s, { W, H } = mapSize();
+    ctx.save(); ctx.imageSmoothingEnabled = false;
+    ctx.transform(-k * s, -k * c, -k * c, k * s,
+        W / 2 - (g.oy - view.vy) * view.s, H / 2 - (g.ox - view.vx) * view.s);
+    ctx.drawImage(cm.cv, 0, 0); ctx.restore();
+}
+
+// ---------- Nav2 log bubbles (from /rosout) ----------
+const bubbles = [];
+const NAV_NODE_RE = /bt_navigator|controller_server|planner_server|behavior_server|waypoint_follower|smoother|nav2/i;
+const NAV_MSG_RE = /goal (reached|succeeded)|reached (the )?goal|collision ahead|failed to cancel|failed to|aborted|cancel(l)?ed|no valid (path|control)|stuck|timed? ?out|recover|invalid path|goal (canceled|failed)/i;
+function onRosout(m) {
+    if (!m || !NAV_NODE_RE.test(m.name || '') || !NAV_MSG_RE.test(m.msg || '')) return;
+    const text = String(m.msg).replace(/\s+/g, ' ').slice(0, 70);
+    const now = performance.now(), last = bubbles[bubbles.length - 1];
+    if (last && last.text === text && now - last.t < 2000) { last.t = now; return; }
+    bubbles.push({ text, node: String(m.name).replace(/^\//, ''), t: now });
+    if (bubbles.length > 3) bubbles.shift();
+    needsDraw = true;
+}
+function drawBubbles(ctx, p, r) {
+    const now = performance.now(), TTL = 7000;
+    for (let i = bubbles.length - 1; i >= 0; i--) if (now - bubbles[i].t > TTL) bubbles.splice(i, 1);
+    if (!bubbles.length) return;
+    ctx.save(); ctx.font = '600 12px Roboto, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    let y = p[1] - r * 2.6 - 12;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+        const b = bubbles[i], age = now - b.t;
+        const a = age > TTL - 1500 ? Math.max(0, (TTL - age) / 1500) : 1;
+        const w = ctx.measureText(b.text).width + 20, h = 24, x = p[0] - w / 2;
+        ctx.globalAlpha = a * (i === bubbles.length - 1 ? 1 : 0.8);
+        ctx.fillStyle = '#16a34a'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.roundRect(x, y - h, w, h, 8); ctx.fill(); ctx.stroke();
+        if (i === bubbles.length - 1) {          // tail pointing at the rover
+            ctx.beginPath(); ctx.moveTo(p[0] - 6, y - 0.5); ctx.lineTo(p[0], y + 7); ctx.lineTo(p[0] + 6, y - 0.5);
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.fillStyle = '#fff'; ctx.fillText(b.text, p[0], y - h / 2 + 1);
+        y -= h + 5;
+    }
+    ctx.restore();
+}
 let currentCmdVel = { linear: 0, angular: 0 };
 
 let activeNavBtn = null;
@@ -312,6 +429,13 @@ function subscribeAll() {
         needsDraw = true;
     });
 
+    mk(T.gcost, 'nav_msgs/OccupancyGrid', (m) => onCostmap('gcost', m));
+    mk(T.lcost, 'nav_msgs/OccupancyGrid', (m) => onCostmap('lcost', m));
+    mk(T.gcostUpd, 'map_msgs/OccupancyGridUpdate', (m) => onCostmapUpdate('gcost', m));
+    mk(T.lcostUpd, 'map_msgs/OccupancyGridUpdate', (m) => onCostmapUpdate('lcost', m));
+    subs.push((() => { const t = new ROSLIB.Topic({ ros, name: T.rosout, messageType: 'rcl_interfaces/msg/Log', queue_length: 200 });
+        t.subscribe(onRosout); return t; })());
+
     const cam = new ROSLIB.Topic({ ros, name: T.camera, messageType: 'sensor_msgs/Image', throttle_rate: 100, queue_length: 1 });
     cam.subscribe(onCameraImage); subs.push(cam);
 
@@ -346,7 +470,7 @@ function resolveFramePose(frame) {
 }
 
 function drawLaserScan(ctx) {
-    if (!showLaserScan || !latestScan || !latestScan.ranges.length) return;
+    if (!layerOn('scan') || !latestScan || !latestScan.ranges.length) return;
 
     const scan = latestScan;
     const pose = resolveFramePose(scan.frame) || robot;
@@ -593,7 +717,7 @@ function toggleFollow() {
     document.getElementById('follow-btn').classList.toggle('on', follow);
     needsDraw = true;
 }
-function toggleLaserScan() {
+function toggleLaserScan() { toggleLayer('scan'); return;
     showLaserScan = !showLaserScan;
     const btn = document.getElementById('scan-btn');
     if (btn) {
@@ -823,7 +947,7 @@ function drawMap() {
 
     if (follow && robot) { view.vx = robot.x; view.vy = robot.y; }
 
-    if (latestMap) {
+    if (latestMap && layerOn('map')) {
         const m = latestMap, c = Math.cos(m.yaw), s = Math.sin(m.yaw), k = m.res * view.s;
         ctx.save();
         ctx.imageSmoothingEnabled = false;
@@ -847,6 +971,8 @@ function drawMap() {
     }
     ctx.stroke();
 
+    if (layerOn('gcost')) drawCostmap(ctx, 'gcost');
+    if (layerOn('lcost')) drawCostmap(ctx, 'lcost');
     drawLaserScan(ctx);
 
     const o = w2s(0, 0), ax = w2s(1, 0), ay = w2s(0, 1);
@@ -854,7 +980,7 @@ function drawMap() {
     ctx.strokeStyle = '#e5484d'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ax[0], ax[1]); ctx.stroke();
     ctx.strokeStyle = '#30a46c'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ay[0], ay[1]); ctx.stroke();
 
-    if (latestPlan && latestPlan.length > 0) {
+    if (layerOn('plan') && latestPlan && latestPlan.length > 0) {
         drawPathWithArrows(ctx, latestPlan, theme['--primary']);
         const finalPt = latestPlan[latestPlan.length - 1];
         drawArrow(ctx, finalPt.x, finalPt.y, finalPt.yaw, theme['--danger'], 'GOAL', 28);
@@ -936,6 +1062,7 @@ function drawMap() {
         }
 
         ctx.restore();
+        drawBubbles(ctx, p, r);
     }
 }
 
@@ -1091,7 +1218,7 @@ function frame(ts) {
         if (!viewFitted) fitMapView();
         needsDraw = true;
     }
-    if (planAnim) needsDraw = true;
+    if (planAnim || bubbles.length) needsDraw = true;
     if (follow || needsDraw) { drawMap(); needsDraw = false; }
     if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
     requestAnimationFrame(frame);
@@ -1445,6 +1572,7 @@ function renderMode() {
     btn.classList.toggle('loading', !!pending);
 
     renderNavCardVisibility();
+    updateLegend();
 
     document.querySelectorAll('.mode-loader').forEach(el => {
         el.classList.toggle('show', !!pending);
@@ -1616,6 +1744,7 @@ joyPad.addEventListener('pointercancel', joyEnd);
 updateJoyEnableButton();
 
 (function init() {
+    updateLegend();
     let saved = null;
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');

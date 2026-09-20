@@ -225,7 +225,6 @@
                     <div class="panel-tools">
                         <button class="tool-btn" onclick="fitMapView()" title="Fit map to panel">Fit</button>
                         <button class="tool-btn" id="follow-btn" onclick="toggleFollow()" title="Keep the rover centred">Follow</button>
-                        <button class="tool-btn on" id="scan-btn" onclick="toggleLaserScan()" title="Show / hide live LiDAR scan">Scan On</button>
                         <button class="tool-btn" onclick="clearMarkers()" title="Remove target and waypoint markers">Clear</button>
                     </div>
                 </div>
@@ -273,6 +272,7 @@
                         </div>
 
                         <canvas id="map-canvas"></canvas>
+                        <div id="layer-legend" class="layer-legend"></div>
                         <div class="map-empty" id="map-empty">Waiting for /map…</div>
                         <div class="map-overlay mono" id="map-cursor">x —  y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
