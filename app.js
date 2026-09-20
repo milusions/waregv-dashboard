@@ -14,9 +14,9 @@ const CFG = {
         joy: '/joy',
         camera: '/camera/image_raw',
         scan: '/scan',
-        gcost: '/global_costmap/costmap',
+        gcost: '/ui/global_costmap',
         gcostUpd: '/global_costmap/costmap_updates',
-        lcost: '/local_costmap/costmap',
+        lcost: '/ui/local_costmap',
         lcostUpd: '/local_costmap/costmap_updates',
         rosout: '/rosout'
     },
