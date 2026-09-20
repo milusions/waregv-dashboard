@@ -24,7 +24,7 @@ const CFG = {
     baseFrames: ['base_link', 'base_footprint'],
     cmdOrder: ['fr', 'fl', 'br', 'bl'],   // commanded: left<->right swapped
     // /joint_states velocity order: FR, FL, RR, RL
-    jointOrder: ['fr', 'fl', 'br', 'bl'],
+    jointOrder: ['fl', 'fr', 'bl', 'br'],   // actual: left<->right swapped vs original
     jointOverrides: {},
     modeUrl: '/system/mode',
     modeTimeoutMs: 40000,
@@ -123,15 +123,22 @@ function layerOn(k) {
     if (typeof currentMode !== 'undefined' && currentMode === 'manual' && COST_ONLY[k]) return false;
     return !!layers[k];
 }
-function toggleLayer(k) { layers[k] = !layers[k]; showLaserScan = layers.scan; updateLegend(); needsDraw = true; }
+function toggleLayer(k) { layers[k] = !layers[k]; showLaserScan = layers.scan; needsDraw = true; }
 function updateLegend() {
     const box = document.getElementById('layer-legend'); if (!box) return;
-    box.innerHTML = '<div class="ll-title">Layers</div>' + LAYER_DEFS.map(([k, label, col]) => {
+    if (!box.dataset.built) {
+        box.innerHTML = '<div class="ll-title">Layers</div>' + LAYER_DEFS.map(([k, label, col]) =>
+            '<label class="ll-row" data-k="' + k + '"><input type="checkbox" data-k="' + k + '"><i style="background:' + col + '"></i>' + label + '</label>').join('');
+        box.querySelectorAll('input').forEach(inp => inp.addEventListener('change', () => toggleLayer(inp.dataset.k)));
+        box.addEventListener('pointerdown', (e) => { e.stopPropagation(); if (typeof closePoseActionPopup === 'function') closePoseActionPopup(); });
+        box.dataset.built = '1';
+    }
+    LAYER_DEFS.forEach(([k]) => {
         const dis = (typeof currentMode !== 'undefined' && currentMode === 'manual' && COST_ONLY[k]);
-        return '<label class="ll-row' + (dis ? ' dis' : '') + '"><input type="checkbox" ' +
-            (layers[k] && !dis ? 'checked ' : '') + (dis ? 'disabled ' : '') +
-            'onchange="toggleLayer(\'' + k + '\')"><i style="background:' + col + '"></i>' + label + '</label>';
-    }).join('');
+        const inp = box.querySelector('input[data-k="' + k + '"]');
+        inp.disabled = !!dis; inp.checked = !!layers[k] && !dis;
+        inp.parentElement.classList.toggle('dis', !!dis);
+    });
 }
 
 // ---------- Costmaps ----------
@@ -2637,6 +2644,12 @@ document.addEventListener('keydown', e => {
 
 // ---- per-graph fullscreen (button in each wheel graph header, Esc to close) ----
 (function () {
+    const st = document.createElement('style');
+    st.textContent = '.chart-full-btn{margin-left:8px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;font-size:12px;line-height:1;padding:3px 6px;cursor:pointer}' +
+        '.chart-full-btn:hover{color:var(--text);border-color:var(--muted)}' +
+        '.panel.chart-full{position:fixed!important;inset:12px;z-index:9999;height:auto!important;width:auto!important;background:var(--panel);box-shadow:0 10px 40px rgba(0,0,0,.35)}' +
+        '#graphs-resizer{display:none!important}';
+    document.head.appendChild(st);
     let full = null;
     function setFull(panel) {
         if (full) { full.classList.remove('chart-full'); full.querySelector('.chart-full-btn').textContent = '⛶'; }
