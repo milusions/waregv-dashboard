@@ -111,7 +111,7 @@
                         SEND
                     </button>
                 </div>
-                <!-- Hinglish Toggle (hidden, manipulated by buttons above) -->
+                <!-- Hinglish Toggle -->
                 <div style="display: none; margin-top: 10px; align-items: center; gap: 6px;">
                     <input type="checkbox" id="hinglish-toggle">
                     <label for="hinglish-toggle" style="margin: 0; font-size: 0.75rem; color: var(--muted); text-transform: none; letter-spacing: normal;">Talk in Hindi (English writing)</label>
@@ -322,8 +322,8 @@
                                 <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
                                     <option value="manual">Manual Driving (Mapping Off)</option>
                                     <option value="slam">Manual Driving + New Mapping</option>
-                                    <option value="slam_update">Autonomous Driving + Map Update</option>
-                                    <option value="nav">Autonomous Driving (Fixed Map)</option>
+                                    <option value="slam_update">Autonomous Driving + Mapping</option>
+                                    <option value="nav">Autonomous Driving + Map Update</option>
                                 </select>
                                 <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
                                 <select id="map-name-select" class="field" disabled onchange="updateMapButtons()">

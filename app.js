@@ -37,8 +37,8 @@ const CFG = {
 const MODE_LABELS = {
     manual: 'Manual Driving (Mapping Off)',
     slam: 'Manual Driving + New Mapping',
-    slam_update: 'Autonomous Driving + Map Update',
-    nav: 'Autonomous Driving (Fixed Map)'
+    slam_update: 'Autonomous Driving + Mapping',
+    nav: 'Autonomous Driving + Map Update'
 };
 
 // =====================================================================
@@ -334,8 +334,6 @@ ros.on('connection', () => {
     if (rosState !== 'up') notify('INFO', 'Connected to rosbridge.');
     rosState = 'up';
     subscribeAll();
-    // REST map discovery is independent of rosbridge. Fetch here as well as
-    // during init so the dropdown is populated after the rover connection is ready.
     fetchMaps({ notifyError: false });
 });
 ros.on('error', () => {
@@ -500,7 +498,6 @@ function drawLaserScan(ctx) {
         const a = scan.angleMin + i * scan.angleInc;
         let lx = r * Math.cos(a), ly = r * Math.sin(a);
 
-        // Transform laser-frame coordinates into map coordinates when TF is available.
         if (framePose) {
             const fc = Math.cos(framePose.yaw), fs = Math.sin(framePose.yaw);
             const mx = framePose.x + fc * lx - fs * ly;
@@ -508,7 +505,6 @@ function drawLaserScan(ctx) {
             const p = w2s(mx, my);
             ctx.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 2);
         } else {
-            // Fallback: treat the scan frame as coincident with the rover base.
             const mx = pose.x + c * lx - s * ly;
             const my = pose.y + s * lx + c * ly;
             const p = w2s(mx, my);
@@ -562,9 +558,6 @@ function pushPoint(arr, v) {
 }
 function onJointState(m) {
     if (!m.velocity) return;
-    // The rover publishes /joint_states velocities in this fixed order:
-    // [FR, FL, RR, RL].  Do not use the joint-name order here because the
-    // controller's JointState array is intentionally ordered differently.
     CFG.jointOrder.forEach((id, i) => {
         if (typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i] * RAD_S_TO_RPM);
     });
@@ -629,9 +622,6 @@ function drawChart(id) {
     const pw = w - L - R, ph = h - T - B;
     const A = series[id].a.filter(p => p.t >= t0 - 1), C = series[id].c;
 
-    // Fixed wheel-speed scale: ±20 rad/s converted to RPM.
-    // The scale never changes with the incoming data, so all four graphs
-    // remain directly comparable.
     const lo = -MAX_WHEEL_RPM;
     const hi = MAX_WHEEL_RPM;
 
@@ -726,15 +716,7 @@ function toggleFollow() {
     document.getElementById('follow-btn').classList.toggle('on', follow);
     needsDraw = true;
 }
-function toggleLaserScan() { toggleLayer('scan'); return;
-    showLaserScan = !showLaserScan;
-    const btn = document.getElementById('scan-btn');
-    if (btn) {
-        btn.classList.toggle('on', showLaserScan);
-        btn.textContent = showLaserScan ? 'Scan On' : 'Scan Off';
-    }
-    needsDraw = true;
-}
+function toggleLaserScan() { toggleLayer('scan'); return; }
 
 function rebuildMapImage() {
     const m = latestMap; if (!m) return;
@@ -832,8 +814,6 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
-// Simple straight-line planning loader shown while Nav2 is calculating.
-// Uses direct segments between the robot and requested targets; no artificial wobble.
 function drawPlanAnim(ctx, now) {
     if (!planAnim) return;
     const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets || []) : (planAnim.targets || []);
@@ -859,7 +839,7 @@ function drawPlanAnim(ctx, now) {
 
     if (p < PLAN_DRAW_MS) {
         const u = p / PLAN_DRAW_MS;
-        progress = u * u * (3 - 2 * u); // smoothstep
+        progress = u * u * (3 - 2 * u);
     } else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) {
         alpha = Math.max(0, 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS);
     }
@@ -871,7 +851,6 @@ function drawPlanAnim(ctx, now) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Very subtle full route preview.
     ctx.globalAlpha = 0.16 * alpha;
     ctx.strokeStyle = col;
     ctx.lineWidth = 2;
@@ -884,7 +863,6 @@ function drawPlanAnim(ctx, now) {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Clean, straight progress line.
     ctx.globalAlpha = 0.95 * alpha;
     ctx.strokeStyle = col;
     ctx.lineWidth = 3;
@@ -905,7 +883,6 @@ function drawPlanAnim(ctx, now) {
     }
     if (started) ctx.stroke();
 
-    // Small moving indicator at the planning head.
     let head = S[0];
     for (const seg of segments) {
         if (headDist <= seg.start + seg.len) {
@@ -924,7 +901,6 @@ function drawPlanAnim(ctx, now) {
     ctx.arc(head[0], head[1], 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Small endpoint markers, kept intentionally minimal.
     for (let i = 1; i < S.length; i++) {
         let distanceToNode = 0;
         for (const seg of segments) {
@@ -966,7 +942,7 @@ function drawMap() {
         ctx.restore();
     }
 
-    const step = view.s >= 6 ? 0.6 : (view.s >= 1.5 ? 3.0 : 6.0);   // 60 cm cells (coarser multiples when zoomed out)
+    const step = view.s >= 6 ? 0.6 : (view.s >= 1.5 ? 3.0 : 6.0);
     document.getElementById('map-grid-label').textContent = 'Grid ' + Math.round(step * 100) + ' cm';
     const a = s2w(0, 0), b = s2w(W, H);
     const xLo = Math.min(a.x, b.x), xHi = Math.max(a.x, b.x), yLo = Math.min(a.y, b.y), yHi = Math.max(a.y, b.y);
@@ -1318,10 +1294,6 @@ function clearMarkers() {
     updateWaypointsUI(); needsDraw = true;
 }
 
-function yawDegToQuaternion(yawDeg) {
-    const r = (yawDeg * Math.PI) / 180;
-    return { yaw_z: Math.sin(r / 2), yaw_w: Math.cos(r / 2) };
-}
 async function postJSON(url, body) {
     const r = await fetch("http://"+ROVER_HOST+":8000"+url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1339,7 +1311,6 @@ async function withBusy(btn, fn) {
 function run(btn, fn) { return withBusy(btn, fn); }
 function runNavButton(btn, fn) { return withBusy(btn, fn); }
 
-// Explicitly bind to window for inline HTML handlers
 window.run = run;
 window.runNavButton = runNavButton;
 
@@ -1408,9 +1379,6 @@ async function fetchMaps(options = {}) {
     const select = document.getElementById('map-name-select');
     if (!select) return;
 
-    // The rover IP is entered in the connection dialog and stored in localStorage.
-    // Do not try to fetch before that value exists: otherwise the browser attempts
-    // to call http://:8000/maps during the very first page load.
     if (!ROVER_HOST) {
         select.disabled = true;
         select.innerHTML = '<option value="">Connect to rover to load maps</option>';
@@ -1521,7 +1489,6 @@ async function saveMapFromModal() {
     }
 }
 
-// Backward-compatible entry point for any existing callers.
 async function saveCurrentMap() {
     openMapSaveModal();
 }
@@ -1665,11 +1632,7 @@ function publishJoy() {
     const ms = Date.now();
     const msg = new ROSLIB.Message({
         header: { stamp: { sec: Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 }, frame_id: 'joy' },
-        // ROS convention used by the rover:
-        // axes[1] = forward/backward, axes[0] = left/right rotation.
-        // Up/forward on the web joystick gives +linear. Right/clockwise gives -angular.
         axes: [-joy.x, -joy.y, 0, 0, 0, 0, 0, 0],
-        // Button index 4 is the enable/dead-man button expected by the rover.
         buttons: [0, 0, 0, 0, joy.enabled ? 1 : 0, 0, 0, 0, 0, 0, 0, 0]
     });
     joyTopic.publish(msg);
@@ -1707,7 +1670,6 @@ function toggleJoyEnabled() {
         startJoyPublishing();
         notify('INFO', 'Joystick enabled. Publishing sensor_msgs/Joy on /joy with button[4] pressed.');
     } else {
-        // Send a final disabled/dead-man message so the rover's button[4] gate stops the robot.
         if (joyTopic && rosState === 'up') {
             publishJoy();
             setTimeout(publishJoy, 50);
@@ -1731,12 +1693,9 @@ function joyMove(evt) {
     
     if (mag > R) { dx *= R / mag; dy *= R / mag; }
     
-    // Add a 10% deadzone to eliminate resting noise
     if (mag < R * 0.1) { dx = 0; dy = 0; }
     
     joy.x = dx / R; joy.y = dy / R; joyShow();
-    
-    // Removed immediate publishJoy() to prevent network flooding
 }
 joyPad.addEventListener('pointerdown', (e) => {
     if (!joy.enabled) {
@@ -1770,7 +1729,6 @@ updateJoyEnableButton();
     requestAnimationFrame(frame);
 })();
 
-// ---- Web Audio API - Emo Sound FX ----
 let audioCtx = null;
 
 function initAudio() {
@@ -1955,8 +1913,8 @@ function handleHelioSocketEvent(data) {
 function closeHelioWebSocket() { helioSocketClosing = true; if (helioSocket) { try { helioSocket.close(1000, 'Helio closed by user'); } catch(e) {} } helioSocket = null; helioSocketPromise = null; helioConversationId = null; setAgentConnectionState(false, 'Offline'); }
 
 const SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
-const SILENCE_COMMIT_MS = 1200;   // no new words for this long after speaking -> send what we have
-const MAX_UTTERANCE_MS = 30000;   // hard cap on one listening session
+const SILENCE_COMMIT_MS = 1200;
+const MAX_UTTERANCE_MS = 30000;
 let lastText = '', lastResultAt = 0, listenStartedAt = 0, committed = false, silenceTimer = null;
 
 function clearListenTimers() {
@@ -1986,7 +1944,6 @@ function commitUtterance(text) {
     processVoiceCommand(text);
 }
 
-// pick the most confident alternative of a result
 function bestAlt(res) {
     let best = res[0];
     for (let j = 1; j < res.length; j++) if (res[j].confidence > best.confidence) best = res[j];
@@ -2006,14 +1963,13 @@ if (SpeechRecognitionImpl) {
     };
 
     recognition.onerror = (e) => {
-        if (e.error === 'aborted' || e.error === 'no-speech') return;   // onend decides what to do
+        if (e.error === 'aborted' || e.error === 'no-speech') return;
         if (agentState !== 'listening') return;
         if (heardSpeech && lastText && !committed) { commitUtterance(lastText); return; }
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
             setRobotMood('listening', 'Error', `Microphone problem: ${e.error}`);
             setTimeout(closeVoiceModal, 3000);
         }
-        // network / other errors: onend restarts until the listen deadline, then sleeps
     };
 
     recognition.onresult = (event) => {
@@ -2031,7 +1987,7 @@ if (SpeechRecognitionImpl) {
         captionText.textContent = full;
 
         if (allFinal) commitUtterance(full);
-        else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);   // silence detected -> send
+        else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);
     };
 
     recognition.onend = () => {
@@ -2040,17 +1996,14 @@ if (SpeechRecognitionImpl) {
         setTimeout(() => { if (modal.classList.contains('active') && agentState === 'listening' && !committed) startRecognition(); }, 120);
     };
 
-    // Watchdog: nothing may leave the assistant stuck in "listening"
     setInterval(() => {
         if (agentState !== 'listening' || committed) return;
         const now = Date.now();
         if (heardSpeech && lastText && now - lastResultAt > SILENCE_COMMIT_MS + 700) commitUtterance(lastText);
-                else if (listenStartedAt && now - listenStartedAt > MAX_UTTERANCE_MS) {
+        else if (listenStartedAt && now - listenStartedAt > MAX_UTTERANCE_MS) {
             if (lastText) commitUtterance(lastText); else { committed = true; setTimeout(() => { if (modal.classList.contains('active') && agentState === 'listening') startRecognition(); }, 100); }
         }
     }, 400);
-} else {
-    console.warn('Speech Recognition not supported in this browser.');
 }
 
 function setRobotMood(className, statusMsg, captionMsg) {
@@ -2059,8 +2012,7 @@ function setRobotMood(className, statusMsg, captionMsg) {
         captionStatus.textContent = statusMsg;
         const live = document.getElementById('agent-connection-state');
         if (live && modal && modal.classList.contains('active')) {
-            const compact = statusMsg === 'Helio' || statusMsg === 'Response' || statusMsg === 'Ready' ? statusMsg : statusMsg;
-            live.textContent = compact;
+            live.textContent = statusMsg;
             live.classList.add('connected');
         }
     }
@@ -2116,14 +2068,11 @@ function speakAndLoop(text) {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         
-        // Assign Indian accent for Hinglish
         const isHinglish = document.getElementById('hinglish-toggle') && document.getElementById('hinglish-toggle').checked;
         utterance.lang = isHinglish ? 'hi-IN' : 'en-US'; 
-        
         utterance.rate = 1.0;
         
         utterance.onend = () => {
-            // ignore end events from utterances that were cancelled / interrupted
             if (window.currentUtterance !== utterance || agentState !== 'speaking') return;
             if (modal.classList.contains('active')) {
                 agentState = 'listening';
@@ -2136,7 +2085,7 @@ function speakAndLoop(text) {
         window.currentUtterance = utterance;
         window.currentSpokenText = text;
         window.speechSynthesis.speak(utterance);
-        syncWake();   // say the wake word to interrupt
+        syncWake();
     } else {
         setTimeout(() => { if (modal.classList.contains('active')) { agentState='listening'; startRecognition(); } }, 300); 
     }
@@ -2271,8 +2220,6 @@ if (SpeechRecognitionImpl) {
             const res = ev.results[i];
             for (let j = 0; j < res.length; j++) {
                 const t = res[j].transcript;
-                
-                // while Helio is talking: only a real, sustained human voice may interrupt
                 if (agentState === 'speaking') {
                     if (isEchoOfSpeech(t)) continue;
                     if (!bargeInAllowed()) continue;
@@ -2295,7 +2242,6 @@ function isEchoOfSpeech(t) {
     return hit / words.length >= 0.5;
 }
 
-// --- Barge-in gate: echo-cancelled mic + sustained loudness above own-voice residual ---
 let vadStream = null, vadCtx = null, vadAn = null, vadBuf = null, vadTimer = null;
 let vadResidual = 0.02, vadLoudSince = 0, vadLastLoud = 0, speakStartAt = 0;
 async function startVad() {
@@ -2318,17 +2264,17 @@ async function startVad() {
         const thr = Math.max(0.09, vadResidual * 3.5);
         if (rms > thr) {
             if (!vadLoudSince) vadLoudSince = now;
-            if (now - vadLoudSince > 450) vadLastLoud = now;   // sustained voice
+            if (now - vadLoudSince > 450) vadLastLoud = now;
         } else {
             vadLoudSince = 0;
-            vadResidual = vadResidual * 0.97 + rms * 0.03;     // learn own-voice leakage
+            vadResidual = vadResidual * 0.97 + rms * 0.03;
         }
     }, 50);
 }
 function stopVad() { if (vadTimer) { clearInterval(vadTimer); vadTimer = null; } }
 function bargeInAllowed() {
-    if (Date.now() - speakStartAt < 1500) return false;        // ignore start-of-speech burst
-    if (!vadTimer) return false;                               // no VAD -> no voice barge-in (Stop button still works)
+    if (Date.now() - speakStartAt < 1500) return false;
+    if (!vadTimer) return false;
     return Date.now() - vadLastLoud < 1500;
 }
 setInterval(() => { if (agentState === 'speaking' && modal.classList.contains('active')) startVad(); else stopVad(); }, 300);
@@ -2336,7 +2282,7 @@ setInterval(() => { if (agentState === 'speaking' && modal.classList.contains('a
 function onWakeWord(initialText = '') {
     stopWake();
     if (modal.classList.contains('active')) {
-        window.currentUtterance = null;   // so the cancelled utterance's onend does nothing
+        window.currentUtterance = null;
         if ('speechSynthesis' in window) window.speechSynthesis.cancel();
         stopThinkingIndicator();
         if (agentState === 'asleep') {
@@ -2381,7 +2327,6 @@ function stopTalking() {
     notify('INFO', 'Announcer stopped.');
 }
 
-// --- Language Toggle Logic ---
 function setLang(lang) {
     const isHi = lang === 'hi';
     const toggle = document.getElementById('hinglish-toggle');
@@ -2390,7 +2335,7 @@ function setLang(lang) {
     document.getElementById('btn-en').classList.toggle('active', !isHi);
     document.getElementById('btn-hi').classList.toggle('active', isHi);
 }
-// ==================== MAP MANAGEMENT ====================
+
 function mapApiUrl(path) {
     return 'http://' + ROVER_HOST + ':8000' + path;
 }
@@ -2593,7 +2538,7 @@ function renderPgmToCanvas(buffer, canvas) {
     function nextToken() {
         while (pos < bytes.length) {
             const c = bytes[pos];
-            if (c === 35) { // # comment
+            if (c === 35) {
                 while (pos < bytes.length && bytes[pos] !== 10 && bytes[pos] !== 13) pos++;
             } else if (c <= 32) {
                 pos++;
@@ -2620,7 +2565,6 @@ function renderPgmToCanvas(buffer, canvas) {
             pixels[i] = Math.max(0, Math.min(255, Math.round(v * 255 / maxval)));
         }
     } else {
-        // P5 pixel data begins after one whitespace character following maxval.
         while (pos < bytes.length && bytes[pos] <= 32) pos++;
         if (maxval <= 255) {
             if (bytes.length - pos < count) throw new Error('PGM pixel data is incomplete');
@@ -2667,15 +2611,11 @@ document.addEventListener('keydown', e => {
     if (preview && !preview.hidden) closeMapPreview();
 });
 
-
-
-// Keep legend interactions from reaching the map (no pose popup / pan / goal on click)
 (function () {
     const lg = document.getElementById('layer-legend'); if (!lg) return;
     ['pointerup', 'pointermove', 'click', 'contextmenu'].forEach(t => lg.addEventListener(t, e => e.stopPropagation()));
 })();
 
-// ---- per-graph fullscreen (button in each wheel graph header, Esc to close) ----
 (function () {
     const st = document.createElement('style');
     st.textContent = '.chart-full-btn{margin-left:8px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;font-size:12px;line-height:1;padding:3px 6px;cursor:pointer}' +
@@ -2703,10 +2643,6 @@ document.addEventListener('keydown', e => {
 
 ensureMapDownloadBtn();
 
-
-// =====================================================================
-//  Map preview viewer: zoom (wheel / +/-), pan (drag), measure tool
-// =====================================================================
 (function () {
     const st = document.createElement('style');
     st.textContent = '.pv-wrap{display:flex;flex-direction:column;width:100%;gap:8px}' +
@@ -2733,7 +2669,6 @@ async function initPreviewViewer(srcCanvas, mapName) {
     const cv = wrap.querySelector('canvas'), info = wrap.querySelector('.pv-info');
     const src = srcCanvas, iw = src.width, ih = src.height;
 
-    // resolution (m/px) from the map yaml, so distances are real metres
     let res = null;
     try {
         const r = await fetch(mapApiUrl('/maps/' + encodeURIComponent(mapName) + '/yaml?t=' + Date.now()), { cache: 'no-store' });
@@ -2776,7 +2711,7 @@ async function initPreviewViewer(srcCanvas, mapName) {
         if (drag) { const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
             if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
             if (moved && !measure) { tx = drag.tx + dx; ty = drag.ty + dy; draw(); } }
-        else if (measure && pts.length === 1) {   // live rubber-band preview
+        else if (measure && pts.length === 1) {
             const r = cv.getBoundingClientRect(), q = toImg(e.clientX - r.left, e.clientY - r.top);
             info.textContent = 'distance: ' + fmt(pts[0], q);
         }
