@@ -270,6 +270,10 @@
                         <div class="map-empty" id="map-empty">Waiting for /map…</div>
                         <div class="map-overlay mono" id="map-cursor">x —  y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
+                        <div id="map-plan-badge" class="map-plan-badge" role="status" aria-live="polite">
+                            <span class="plan-spinner" aria-hidden="true"></span>
+                            <span>Waiting for Nav2 to plan path…</span>
+                        </div>
 
                         <div id="map-pose-popup" class="map-pose-popup" role="dialog" aria-label="Map pose actions" 
                              onpointerdown="event.stopPropagation()" 
@@ -281,6 +285,13 @@
                             <button type="button" class="primary-action" onclick="popupNavigateToPoint()">Navigate to point</button>
                             <button type="button" onclick="popupSetInitialCheckpoint()">Set initial checkpoint</button>
                             <button type="button" onclick="popupAddWaypoint()">Add to waypoints</button>
+                        </div>
+                    </div>
+                    <div class="mode-loader" role="status" aria-live="polite">
+                        <div class="mode-loader-card">
+                            <div class="ml-spinner" aria-hidden="true"></div>
+                            <div class="ml-title">Switching mode</div>
+                            <div class="ml-sub">Changing mode<span class="ml-dots"><i>.</i><i>.</i><i>.</i></span></div>
                         </div>
                     </div>
                 </div>
@@ -316,6 +327,13 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+                </div>
+                <div class="mode-loader" role="status" aria-live="polite">
+                    <div class="mode-loader-card">
+                        <div class="ml-spinner" aria-hidden="true"></div>
+                        <div class="ml-title">Switching mode</div>
+                        <div class="ml-sub">Changing mode<span class="ml-dots"><i>.</i><i>.</i><i>.</i></span></div>
                     </div>
                 </div>
             </aside>

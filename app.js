@@ -98,6 +98,24 @@ let currentCmdVel = { linear: 0, angular: 0 };
 let activeNavBtn = null;
 let navInitTimeout = null;
 
+// "Waiting for Nav2" placeholder animation (drawn on the map canvas until /plan arrives)
+let planAnim = null;
+const PLAN_DRAW_MS = 1800, PLAN_HOLD_MS = 600, PLAN_FADE_MS = 300;
+
+function startPlanAnim(targets) {
+    const list = (targets || []).filter(t => t && isFinite(t.x) && isFinite(t.y)).map(t => ({ x: t.x, y: t.y }));
+    planAnim = list.length ? { targets: list, t0: performance.now() } : null;
+    const badge = document.getElementById('map-plan-badge');
+    if (badge) badge.classList.toggle('show', !!planAnim);
+    needsDraw = true;
+}
+function stopPlanAnim() {
+    planAnim = null;
+    const badge = document.getElementById('map-plan-badge');
+    if (badge) badge.classList.remove('show');
+    needsDraw = true;
+}
+
 function setNavLoading(btn) {
     if (activeNavBtn) {
         activeNavBtn.classList.remove('loading');
@@ -111,6 +129,7 @@ function setNavLoading(btn) {
 }
 
 function clearNavLoading() {
+    stopPlanAnim();
     if (navInitTimeout) {
         clearTimeout(navInitTimeout);
         navInitTimeout = null;
@@ -573,6 +592,86 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
+// Fictional "thinking" path: robot -> waypoints... -> target, drawn progressively and looped
+// until Nav2 publishes the real plan.
+function drawPlanAnim(ctx, now) {
+    if (!planAnim) return;
+    const nodesW = robot ? [{ x: robot.x, y: robot.y }].concat(planAnim.targets) : planAnim.targets;
+    if (nodesW.length < 2) return;
+
+    const el = now - planAnim.t0;
+    const p = el % (PLAN_DRAW_MS + PLAN_HOLD_MS + PLAN_FADE_MS);
+    let prog = 1, alpha = 1;
+    if (p < PLAN_DRAW_MS) { const u = p / PLAN_DRAW_MS; prog = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2; }
+    else if (p > PLAN_DRAW_MS + PLAN_HOLD_MS) alpha = 1 - (p - PLAN_DRAW_MS - PLAN_HOLD_MS) / PLAN_FADE_MS;
+
+    // Wobbling polyline in screen space (wobble is 0 at every node, so it passes exactly through them)
+    const S = nodesW.map(n => w2s(n.x, n.y));
+    const pts = [S[0]], nodeIdx = [0], phase = el / 260;
+    for (let i = 0; i < S.length - 1; i++) {
+        const a = S[i], b = S[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+        if (len < 1) { pts.push(b); nodeIdx.push(pts.length - 1); continue; }
+        const nx = -dy / len, ny = dx / len;
+        const n = Math.max(6, Math.ceil(len / 8));
+        const amp = Math.min(16, len * 0.14);
+        const waves = Math.max(1, Math.round(len / 110));
+        for (let k = 1; k <= n; k++) {
+            const t = k / n;
+            const off = amp * Math.sin(Math.PI * t) * Math.sin(2 * Math.PI * waves * t + phase + i * 1.7);
+            pts.push([a[0] + dx * t + nx * off, a[1] + dy * t + ny * off]);
+        }
+        nodeIdx.push(pts.length - 1);
+    }
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const total = cum[cum.length - 1];
+    if (total < 1) return;
+    const headLen = prog * total;
+    const col = theme['--primary'];
+
+    ctx.save();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+    // faint ghost of the whole route
+    ctx.globalAlpha = 0.18 * alpha; ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+    ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // drawn trail with a fading tail
+    ctx.lineWidth = 3.5; ctx.strokeStyle = col;
+    let head = pts[0];
+    for (let i = 1; i < pts.length && cum[i - 1] < headLen; i++) {
+        let x = pts[i][0], y = pts[i][1];
+        if (cum[i] > headLen) {
+            const t = (headLen - cum[i - 1]) / (cum[i] - cum[i - 1]);
+            x = pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t;
+            y = pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t;
+        }
+        ctx.globalAlpha = alpha * Math.max(0.25, 1 - (headLen - cum[i - 1]) / 260);
+        ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(x, y); ctx.stroke();
+        head = [x, y];
+    }
+
+    // rippling markers on every waypoint / target the head has passed
+    for (let j = 1; j < nodeIdx.length; j++) {
+        if (cum[nodeIdx[j]] > headLen + 0.5) continue;
+        const q = pts[nodeIdx[j]], f = ((el / 900) + j * 0.3) % 1;
+        ctx.globalAlpha = alpha * (1 - f) * 0.7; ctx.lineWidth = 2; ctx.strokeStyle = col;
+        ctx.beginPath(); ctx.arc(q[0], q[1], 6 + f * 14, 0, 7); ctx.stroke();
+        ctx.globalAlpha = alpha; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill();
+    }
+
+    // glowing head
+    if (prog < 1) {
+        ctx.globalAlpha = alpha * 0.3; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(head[0], head[1], 10, 0, 7); ctx.fill();
+        ctx.globalAlpha = alpha; ctx.fillStyle = '#fff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(head[0], head[1], 4.5, 0, 7); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+}
+
 function drawMap() {
     const dpr = window.devicePixelRatio || 1;
     const W = mapCanvas.clientWidth, H = mapCanvas.clientHeight;
@@ -620,6 +719,8 @@ function drawMap() {
         const finalPt = latestPlan[latestPlan.length - 1];
         drawArrow(ctx, finalPt.x, finalPt.y, finalPt.yaw, theme['--danger'], 'GOAL', 28);
     }
+
+    drawPlanAnim(ctx, performance.now());
 
     const WPCOL = '#E8A317', TCOL = '#0077ff';
     if (waypointsData.length > 1) {
@@ -850,6 +951,7 @@ function frame(ts) {
         if (!viewFitted) fitMapView();
         needsDraw = true;
     }
+    if (planAnim) needsDraw = true;
     if (follow || needsDraw) { drawMap(); needsDraw = false; }
     if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
     requestAnimationFrame(frame);
@@ -935,6 +1037,7 @@ function clearMarkers() {
     closePoseActionPopup();
     singleTarget = null; waypointsData = []; activeGoal = null; latestPlan = [];
     navStatus = 'Idle';
+    stopPlanAnim();
     updateWaypointsUI(); needsDraw = true;
 }
 
@@ -975,6 +1078,8 @@ async function sendGoalPose() {
     setNavLoading(btn);
     startNavWatchdog();
     const t = readTarget();
+    latestPlan = [];
+    startPlanAnim([t]);
     try {
         await postJSON('/navigate_to_pose', { x: t.x, y: t.y, yaw_deg: t.yawDeg });
         navStatus = 'Navigating';
@@ -996,6 +1101,8 @@ async function sendWaypoints() {
     const btn = document.getElementById('follow-wp-btn');
     setNavLoading(btn);
     startNavWatchdog();
+    latestPlan = [];
+    startPlanAnim(waypointsData);
     const waypoints = waypointsData.map(wp => ({ x: wp.x, y: wp.y, yaw_deg: wp.yaw }));
     try {
         await postJSON('/follow_waypoints', { waypoints });
@@ -1068,6 +1175,11 @@ function renderMode() {
     }
     btn.disabled = !!pending;
     btn.classList.toggle('loading', !!pending);
+
+    document.querySelectorAll('.mode-loader').forEach(el => {
+        el.classList.toggle('show', !!pending);
+        if (pending) el.querySelector('.ml-title').textContent = 'Switching to ' + MODE_LABELS[pending.target];
+    });
 }
 
 function setCurrentMode(m) {
