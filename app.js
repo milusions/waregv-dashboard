@@ -26,7 +26,12 @@ const CFG = {
     joyRateHz: 20
 };
 
-const MODE_LABELS = { slam: 'SLAM Only', slam_nav: 'SLAM + Nav', slam_update: 'SLAM Update + Nav', nav: 'Nav Only', manual: 'Manual' };
+const MODE_LABELS = {
+    manual: 'Manual Driving (Mapping Off)',
+    slam: 'Manual Driving + New Mapping',
+    slam_update: 'Autonomous Driving + Map Update',
+    nav: 'Autonomous Driving (Fixed Map)'
+};
 
 // =====================================================================
 //  Notifications
@@ -1123,23 +1128,80 @@ async function sendAbort() {
     }
     catch (e) { notify('ERROR', 'Failed to abort mission: ' + e.message); }
 }
+let availableMaps = [];
+let mapsLoading = false;
+
+async function fetchMaps() {
+    if (mapsLoading) return;
+    mapsLoading = true;
+    const select = document.getElementById('map-name-select');
+    try {
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), 5000);
+        const r = await fetch("http://" + ROVER_HOST + ":8000/maps", { cache: 'no-store', signal: ctl.signal });
+        clearTimeout(to);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        availableMaps = Array.isArray(data.maps) ? data.maps : [];
+
+        if (!select) return;
+        const previous = select.value;
+        select.innerHTML = '';
+
+        if (!availableMaps.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No saved maps';
+            select.appendChild(opt);
+        } else {
+            availableMaps.forEach(name => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                select.appendChild(opt);
+            });
+            if (availableMaps.includes(previous)) select.value = previous;
+        }
+        select.disabled = false;
+        select.dataset.loaded = 'true';
+    } catch (e) {
+        if (select) {
+            select.innerHTML = '<option value="">Unable to load maps</option>';
+            select.disabled = false;
+        }
+        notify('WARNING', 'Could not fetch saved maps: ' + e.message);
+    } finally {
+        mapsLoading = false;
+    }
+}
+
 async function saveCurrentMap() {
-    const mapName = document.getElementById('map-name-input').value;
-    if (!mapName) return notify('WARNING', 'Please enter a map name to save.');
-    try { await postJSON('/system/save_map', { map_name: mapName }); notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…'); }
-    catch (e) { notify('ERROR', 'Failed to save map: ' + e.message); }
+    const select = document.getElementById('map-name-select');
+    const mapName = select ? select.value.trim() : '';
+    if (!mapName) {
+        return notify('WARNING', 'Select a map name before saving.');
+    }
+    try {
+        await postJSON('/system/save_map', { map_name: mapName });
+        notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…');
+        setTimeout(fetchMaps, 1200);
+    } catch (e) {
+        notify('ERROR', 'Failed to save map: ' + e.message);
+    }
 }
 
 let currentMode = null, pending = null, modeSelectTouched = false, modeTimer = null, polling = false;
 
 function normalizeMode(raw) {
     if (raw === undefined || raw === null) return null;
-    const s = String(raw).toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, '');
-    if (['slam_update', 'slam_update_nav', 'continued_mapping', 'lifelong_mapping', 'lifelong'].includes(s)) return 'slam_update';
-    if (['slam_nav', 'slam_with_nav', 'slam_navigation', 'slam_and_nav', 'slam_nav2'].includes(s)) return 'slam_nav';
-    if (['slam', 'slam_only', 'mapping', 'mapping_only'].includes(s)) return 'slam';
-    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization'].includes(s)) return 'nav';
-    if (['manual', 'teleop', 'joystick'].includes(s)) return 'manual';
+    const s = String(raw).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    if (['slam_update', 'slam_update_nav', 'autonomous_driving_map_update', 'autonomous_map_update',
+         'mapping_navigation_update'].includes(s)) return 'slam_update';
+    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization',
+         'autonomous_driving_fixed_map', 'fixed_map', 'autonomous_fixed_map'].includes(s)) return 'nav';
+    if (['slam', 'slam_only', 'mapping', 'mapping_only', 'manual_mapping',
+         'manual_driving_new_mapping', 'new_mapping'].includes(s)) return 'slam';
+    if (['manual', 'teleop', 'joystick', 'manual_driving_mapping_off', 'manual_mapping_off'].includes(s)) return 'manual';
     return null;
 }
 
@@ -1221,7 +1283,7 @@ function scheduleModePoll() {
 async function applySystemMode() {
     if (pending) return;
     const mode = document.getElementById('sys-mode-select').value;
-    const mapName = document.getElementById('map-name-input').value || 'small_warehouse';
+    const mapName = document.getElementById('map-name-select').value || '';
     if (mode === currentMode) return notify('INFO', 'Already in ' + MODE_LABELS[mode] + ' mode.');
 
     const p = { target: mode, timer: null };
@@ -1296,6 +1358,7 @@ joyPad.addEventListener('pointercancel', joyEnd);
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');
     renderMode();
+    fetchMaps();
     pollMode().then(scheduleModePoll);
     requestAnimationFrame(frame);
 })();

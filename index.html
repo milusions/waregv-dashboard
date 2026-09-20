@@ -320,13 +320,15 @@
                             <div class="sec-title">System Mode</div>
                             <div class="stack">
                                 <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
-                                    <option value="slam">SLAM Only (Mapping)</option>
-                                    <option value="slam_nav">SLAM + Navigation</option>
-                                    <option value="slam_update">SLAM Update + Navigation</option>
-                                    <option value="manual">Manual (Joystick)</option>
+                                    <option value="manual">Manual Driving (Mapping Off)</option>
+                                    <option value="slam">Manual Driving + New Mapping</option>
+                                    <option value="slam_update">Autonomous Driving + Map Update</option>
+                                    <option value="nav">Autonomous Driving (Fixed Map)</option>
                                 </select>
                                 <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
-                                <input type="text" id="map-name-input" class="field" placeholder="Map name (e.g. warehouse)" value="small_warehouse">
+                                <select id="map-name-select" class="field" disabled>
+                                    <option value="">Loading maps…</option>
+                                </select>
                                 <div class="btn-row">
                                     <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
                                     <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
