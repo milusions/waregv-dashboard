@@ -26,7 +26,7 @@ const CFG = {
     joyRateHz: 20
 };
 
-const MODE_LABELS = { slam_update: 'Autonomous (New Map)', manual: 'Manual' };
+const MODE_LABELS = { slam: 'SLAM Only', slam_nav: 'SLAM + Nav', slam_update: 'SLAM Update + Nav', nav: 'Nav Only', manual: 'Manual' };
 
 // =====================================================================
 //  Notifications
@@ -1019,7 +1019,7 @@ async function sendAbort() {
 async function saveCurrentMap() {
     const mapName = document.getElementById('map-name-input').value;
     if (!mapName) return notify('WARNING', 'Please enter a map name to save.');
-    try { await postJSON('/system/save_map', { map_name: mapName }); notify('INFO', 'Saving "' + mapName + '" map (.pgm/.yaml)…'); }
+    try { await postJSON('/system/save_map', { map_name: mapName }); notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…'); }
     catch (e) { notify('ERROR', 'Failed to save map: ' + e.message); }
 }
 
@@ -1028,10 +1028,10 @@ let currentMode = null, pending = null, modeSelectTouched = false, modeTimer = n
 function normalizeMode(raw) {
     if (raw === undefined || raw === null) return null;
     const s = String(raw).toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, '');
-    if (['slam_update', 'slam_update_nav', 'continued_mapping', 'lifelong_mapping', 'lifelong',
-         'slam_nav', 'slam_with_nav', 'slam_navigation', 'slam_and_nav', 'slam_nav2',
-         'slam', 'slam_only', 'mapping', 'mapping_only',
-         'nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization'].includes(s)) return 'slam_update';
+    if (['slam_update', 'slam_update_nav', 'continued_mapping', 'lifelong_mapping', 'lifelong'].includes(s)) return 'slam_update';
+    if (['slam_nav', 'slam_with_nav', 'slam_navigation', 'slam_and_nav', 'slam_nav2'].includes(s)) return 'slam_nav';
+    if (['slam', 'slam_only', 'mapping', 'mapping_only'].includes(s)) return 'slam';
+    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization'].includes(s)) return 'nav';
     if (['manual', 'teleop', 'joystick'].includes(s)) return 'manual';
     return null;
 }
@@ -1272,6 +1272,38 @@ let thinkingTimer = null;
 let thinkingStageIndex = 0;
 window.currentUtterance = null;
 
+// =====================================================================
+//  Physical eyes (Arduino Nano OLED, driven through commander_rest_api)
+// =====================================================================
+function pushEyes(type, extra) {
+    fetch('/eyes/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ type }, extra || {}))
+    }).catch(() => {});
+}
+
+let speakPulseTimer = null;
+function startSpeakPulse() {
+    stopSpeakPulse();
+    speakPulseTimer = setInterval(() => {
+        if (!('speechSynthesis' in window) || !window.speechSynthesis.speaking) { stopSpeakPulse(); return; }
+        pushEyes('speaking', { level: 30 + Math.round(Math.random() * 60) });
+    }, 130);
+}
+function stopSpeakPulse() {
+    if (speakPulseTimer) clearInterval(speakPulseTimer);
+    speakPulseTimer = null;
+}
+
+// Occasional random "thought bubble" while idle/asleep, mirrored on the physical eyes.
+setInterval(() => {
+    if (agentState !== 'idle' && agentState !== 'asleep') return;
+    if (Math.random() > 0.15) return;
+    const thoughts = ['HMM...', 'WAITING', 'ALL GOOD', 'ANY TASK?'];
+    pushEyes('bubble', { text: thoughts[Math.floor(Math.random() * thoughts.length)] });
+}, 8000);
+
 const thinkingPanel = document.getElementById('thinking-panel');
 const thinkingStageText = document.getElementById('thinking-stage-text');
 
@@ -1435,6 +1467,23 @@ function setRobotMood(className, statusMsg, captionMsg) {
     if (statusMsg !== null) captionStatus.textContent = statusMsg;
     if (captionMsg !== null) {
         captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
+    }
+
+    if (className === 'listening') {
+        stopSpeakPulse();
+        pushEyes('listening', { level: 0 });
+    } else if (className === 'thinking') {
+        stopSpeakPulse();
+        pushEyes('thinking');
+    } else if (className === 'speaking') {
+        pushEyes('speaking', { level: 0 });
+        startSpeakPulse();
+    } else if (className === 'sleeping' || className === 'idle') {
+        stopSpeakPulse();
+        pushEyes('idle');
+    } else if (className === 'startled') {
+        stopSpeakPulse();
+        pushEyes('bubble', { text: 'YES?' });
     }
 }
 
@@ -1798,7 +1847,7 @@ function isEchoOfSpeech(t) {
 
 // --- Barge-in gate: echo-cancelled mic + sustained loudness above own-voice residual ---
 let vadStream = null, vadCtx = null, vadAn = null, vadBuf = null, vadTimer = null;
-let vadResidual = 0.02, vadLoudSince = 0, vadLastLoud = 0, speakStartAt = 0;
+let vadResidual = 0.02, vadLoudSince = 0, vadLastLoud = 0, speakStartAt = 0, lastEyesLevelPush = 0;
 async function startVad() {
     if (vadTimer) return;
     speakStartAt = Date.now(); vadResidual = 0.02; vadLoudSince = 0; vadLastLoud = 0;
@@ -1824,6 +1873,10 @@ async function startVad() {
             vadLoudSince = 0;
             vadResidual = vadResidual * 0.97 + rms * 0.03;     // learn own-voice leakage
         }
+        if (agentState === 'listening' && now - lastEyesLevelPush > 150) {
+            lastEyesLevelPush = now;
+            pushEyes('listening', { level: Math.min(100, Math.round(rms * 600)) });
+        }
     }, 50);
 }
 function stopVad() { if (vadTimer) { clearInterval(vadTimer); vadTimer = null; } }
@@ -1832,7 +1885,10 @@ function bargeInAllowed() {
     if (!vadTimer) return false;                               // no VAD -> no voice barge-in (Stop button still works)
     return Date.now() - vadLastLoud < 1500;
 }
-setInterval(() => { if (agentState === 'speaking' && modal.classList.contains('active')) startVad(); else stopVad(); }, 300);
+setInterval(() => {
+    if ((agentState === 'speaking' || agentState === 'listening') && modal.classList.contains('active')) startVad();
+    else stopVad();
+}, 300);
 
 function onWakeWord(initialText = '') {
     stopWake();
