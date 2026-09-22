@@ -1276,11 +1276,7 @@ window.currentUtterance = null;
 //  Physical eyes (Arduino Nano OLED, driven through commander_rest_api)
 // =====================================================================
 function pushEyes(type, extra) {
-    fetch('/eyes/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({ type }, extra || {}))
-    }).catch(() => {});
+    postJSON('/eyes/event', Object.assign({ type }, extra || {})).catch(() => {});
 }
 
 let speakPulseTimer = null;
