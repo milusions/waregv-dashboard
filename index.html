@@ -111,7 +111,7 @@
                         SEND
                     </button>
                 </div>
-                <!-- Hinglish Toggle -->
+                <!-- Hinglish Toggle (hidden, manipulated by buttons above) -->
                 <div style="display: none; margin-top: 10px; align-items: center; gap: 6px;">
                     <input type="checkbox" id="hinglish-toggle">
                     <label for="hinglish-toggle" style="margin: 0; font-size: 0.75rem; color: var(--muted); text-transform: none; letter-spacing: normal;">Talk in Hindi (English writing)</label>
@@ -122,16 +122,11 @@
                 <span class="thinking-spinner" aria-hidden="true"></span>
                 <span id="thinking-stage-text">Analyzing prompt</span>
             </div>
+
             <div class="caption-container">
                 <div class="caption-header-row">
                     <div id="caption-status" class="caption-status">Listening</div>
                     <button id="stop-talking-btn" class="stop-talking-btn" onclick="stopTalking()" title="Stop announcer">Stop Talking</button>
-                </div>
-                <div id="agent-live-status" class="agent-live-status" aria-live="polite">
-                    <div class="agent-live-status-head">
-                        <span>LIVE AGENT</span><span id="agent-connection-state">Offline</span>
-                    </div>
-                    <div id="agent-event-list" class="agent-event-list" aria-hidden="true"></div>
                 </div>
                 <div id="caption-text" class="caption-text md-viewer">Speak now...</div>
             </div>
@@ -272,14 +267,9 @@
                         </div>
 
                         <canvas id="map-canvas"></canvas>
-                        <div id="layer-legend" class="layer-legend"></div>
                         <div class="map-empty" id="map-empty">Waiting for /map…</div>
                         <div class="map-overlay mono" id="map-cursor">x —  y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
-                        <div id="map-plan-badge" class="map-plan-badge" role="status" aria-live="polite">
-                            <span class="plan-spinner" aria-hidden="true"></span>
-                            <span>Waiting for Nav2 to plan path…</span>
-                        </div>
 
                         <div id="map-pose-popup" class="map-pose-popup" role="dialog" aria-label="Map pose actions" 
                              onpointerdown="event.stopPropagation()" 
@@ -291,13 +281,6 @@
                             <button type="button" class="primary-action" onclick="popupNavigateToPoint()">Navigate to point</button>
                             <button type="button" onclick="popupSetInitialCheckpoint()">Set initial checkpoint</button>
                             <button type="button" onclick="popupAddWaypoint()">Add to waypoints</button>
-                        </div>
-                    </div>
-                    <div class="mode-loader" role="status" aria-live="polite">
-                        <div class="mode-loader-card">
-                            <div class="ml-spinner" aria-hidden="true"></div>
-                            <div class="ml-title">Switching mode</div>
-                            <div class="ml-sub">Changing mode<span class="ml-dots"><i>.</i><i>.</i><i>.</i></span></div>
                         </div>
                     </div>
                 </div>
@@ -320,33 +303,17 @@
                             <div class="sec-title">System Mode</div>
                             <div class="stack">
                                 <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
-                                    <option value="manual">Manual Driving (Mapping Off)</option>
-                                    <option value="slam">Manual Driving + New Mapping</option>
-                                    <option value="slam_update">Autonomous Driving + Mapping</option>
-                                    <option value="nav">Autonomous Driving + Map Update</option>
+                                    <option value="slam_update">Autonomous Driving + New Mapping</option>
+                                    <option value="manual">Manual (Joystick)</option>
                                 </select>
                                 <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
-                                <select id="map-name-select" class="field" disabled onchange="updateMapButtons()">
-                                    <option value="">Loading maps…</option>
-                                </select>
-                                <div class="map-manage-row">
-                                    <button class="btn btn-secondary" type="button" onclick="openMapAddModal()">Add Map</button>
-                                    <button class="btn btn-secondary" id="view-map-btn" type="button" onclick="openSelectedMapPreview()" disabled>View PGM</button>
-                                    <button class="btn btn-danger" id="delete-map-btn" type="button" onclick="deleteSelectedMap()" disabled>Delete</button>
-                                </div>
+                                <input type="text" id="map-name-input" class="field" placeholder="Map name (e.g. warehouse)" value="small_warehouse">
                                 <div class="btn-row">
                                     <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
-                                    <button class="btn btn-success" onclick="openMapSaveModal()">Save Map</button>
+                                    <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                </div>
-                <div class="mode-loader" role="status" aria-live="polite">
-                    <div class="mode-loader-card">
-                        <div class="ml-spinner" aria-hidden="true"></div>
-                        <div class="ml-title">Switching mode</div>
-                        <div class="ml-sub">Changing mode<span class="ml-dots"><i>.</i><i>.</i><i>.</i></span></div>
                     </div>
                 </div>
             </aside>
@@ -383,7 +350,6 @@
                                 <span>fwd <b id="joy-y">0.00</b></span>
                                 <span>turn <b id="joy-x">0.00</b></span>
                             </div>
-                            <button id="joy-enable-btn" class="btn btn-success joy-enable" type="button" onclick="toggleJoyEnabled()">Enable</button>
                         </div>
                     </div>
                 </section>
@@ -391,16 +357,16 @@
 
             <!-- Wheel graphs -->
             <div class="graphs">
-                <section class="panel"><div class="panel-hd"><span>Front Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Front Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fl-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-fl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Front Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Front Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fr-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fr-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-fr"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-bl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-bl-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-bl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed · RPM)</span></span>
+                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
                     <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-br-a">—</b></span><span class="b"><i></i>cmd<b id="lg-br-c">—</b></span></div></div>
                     <div class="panel-body"><canvas class="chart-canvas" id="chart-br"></canvas></div></section>
             </div>
@@ -408,73 +374,6 @@
     </div>
 
     <div id="notify-stack"></div>
-
-    <div id="map-add-modal" class="map-manager-modal" hidden>
-        <div class="map-manager-card" role="dialog" aria-modal="true" aria-labelledby="map-add-title">
-            <div class="map-manager-head">
-                <div>
-                    <div id="map-add-title" class="map-manager-title">Add Map</div>
-                    <div class="map-manager-sub">Upload a PGM occupancy image and its Nav2 YAML.</div>
-                </div>
-                <button class="map-manager-close" type="button" onclick="closeMapAddModal()">&times;</button>
-            </div>
-            <div class="map-manager-body">
-                <label class="map-manager-label">Map name</label>
-                <input id="new-map-name" class="field" type="text" placeholder="e.g. warehouse_new" autocomplete="off">
-                <label class="map-manager-label">PGM file</label>
-                <input id="new-map-pgm" class="map-file-input" type="file" accept=".pgm,image/x-portable-graymap">
-                <label class="map-manager-label">YAML file</label>
-                <input id="new-map-yaml" class="map-file-input" type="file" accept=".yaml,.yml,text/yaml">
-                <label class="map-manager-label">Pose graph (.posegraph) &mdash; required</label>
-                <input id="new-map-posegraph" class="map-file-input" type="file" accept=".posegraph">
-                <label class="map-manager-label">Pose graph data (.data) &mdash; required</label>
-                <input id="new-map-data" class="map-file-input" type="file" accept=".data">
-                <div id="map-add-error" class="map-manager-error"></div>
-            </div>
-            <div class="map-manager-foot">
-                <button class="btn btn-secondary" type="button" onclick="closeMapAddModal()">Cancel</button>
-                <button class="btn btn-primary" id="add-map-submit" type="button" onclick="addMapFromFiles()">Add Map</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="map-save-modal" class="map-manager-modal" hidden>
-        <div class="map-manager-card" role="dialog" aria-modal="true" aria-labelledby="map-save-title">
-            <div class="map-manager-head">
-                <div>
-                    <div id="map-save-title" class="map-manager-title">Save Current Map</div>
-                    <div class="map-manager-sub">Enter the name to use for the current SLAM map and its continuation data.</div>
-                </div>
-                <button class="map-manager-close" type="button" onclick="closeMapSaveModal()">&times;</button>
-            </div>
-            <div class="map-manager-body">
-                <label class="map-manager-label">Map name</label>
-                <input id="save-map-name" class="field" type="text" placeholder="e.g. small_warehouse_4" autocomplete="off">
-                <div id="map-save-error" class="map-manager-error"></div>
-            </div>
-            <div class="map-manager-foot">
-                <button class="btn btn-secondary" type="button" onclick="closeMapSaveModal()">Cancel</button>
-                <button class="btn btn-success" id="save-map-submit" type="button" onclick="saveMapFromModal()">Save Map</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="map-preview-modal" class="map-manager-modal" hidden>
-        <div class="map-preview-card" role="dialog" aria-modal="true" aria-labelledby="map-preview-title">
-            <div class="map-manager-head">
-                <div>
-                    <div id="map-preview-title" class="map-manager-title">Map Preview</div>
-                    <div id="map-preview-meta" class="map-manager-sub">PGM occupancy image</div>
-                </div>
-                <button class="map-manager-close" type="button" onclick="closeMapPreview()">&times;</button>
-            </div>
-            <div class="map-preview-body">
-                <div id="map-preview-loading" class="map-preview-loading">Loading PGM…</div>
-                <canvas id="map-preview-canvas"></canvas>
-                <div id="map-preview-error" class="map-manager-error"></div>
-            </div>
-        </div>
-    </div>
 
     <script src="app.js"></script>
     <script>
