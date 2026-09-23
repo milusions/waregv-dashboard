@@ -1,32 +1,12 @@
 // =====================================================================
-//  CONFIGURATION — adjust topic names / endpoints here
+//  CONFIGURATION
 // =====================================================================
 const CFG = {
-    topics: {
-        map: '/map',
-        plan: '/plan',
-        odom: '/odom',
-        tf: '/tf',
-        tfStatic: '/tf_static',
-        joint: '/joint_states',
-        cmd: '/velocity_controller/commands',
-        cmdVel: '/cmd_vel',
-        joy: '/joy',
-        camera: '/camera/image_raw'
-    },
-    mapFrame: 'map',
-    baseFrames: ['base_link', 'base_footprint'],
-    cmdOrder: ['fr', 'br', 'fl', 'bl'],
-    jointOverrides: {},
-    modeUrl: '/system/mode',
-    modeTimeoutMs: 40000,
-    modePollMs: 1000,
-    modeIdlePollMs: 5000,
     chartWindowSec: 30,
     joyRateHz: 20
 };
 
-const MODE_LABELS = { slam: 'SLAM Only', slam_nav: 'SLAM + Nav', slam_update: 'SLAM Update + Nav', nav: 'Nav Only', manual: 'Manual' };
+const MODE_LABELS = { auto_nav: 'Autonomous Navigation and Driving' };
 
 // =====================================================================
 //  Notifications
@@ -90,7 +70,6 @@ let latestPlan = [];
 let navStatus = 'Idle'; 
 let distanceRemaining = 0;
 const mapCanvasOff = document.createElement('canvas');
-const tfTree = {};
 let odom = null;
 let robot = null;
 let currentCmdVel = { linear: 0, angular: 0 };
@@ -131,7 +110,7 @@ function startNavWatchdog() {
         try {
             await postJSON('/abort');
         } catch (e) {}
-        notify('ERROR', 'something is wrong with the navigation server.');
+        notify('ERROR', 'Mock watchdog timeout. Navigation server aborted.');
     }, 20000);
 }
 
@@ -140,225 +119,14 @@ const series = {};
 wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
 // =====================================================================
-//  ROS connection
+//  Mock API Hooks
 // =====================================================================
-// ---- Rover IP (stored in localStorage as "rover_ip") ----
-const ROVER_IP_KEY = 'rover_ip';
-function normalizeRoverIp(v) {
-    return (v || '').trim().replace(/^[a-z]+:\/\//i, '').replace(/[\/?#].*$/, '').replace(/:\d+$/, '');
-}
-function isValidRoverHost(h) {
-    return /^(\d{1,3}(\.\d{1,3}){3}|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)$/i.test(h);
-}
-function getRoverIp() {
-    try { return normalizeRoverIp(localStorage.getItem(ROVER_IP_KEY)); } catch (e) { return ''; }
-}
-function saveRoverIpAndReload(v) {
-    const ip = normalizeRoverIp(v);
-    if (!isValidRoverHost(ip)) return false;
-    try { localStorage.setItem(ROVER_IP_KEY, ip); } catch (e) {}
-    location.reload();
-    return true;
-}
-const ROVER_IP = getRoverIp();
-const ROVER_HOST = ROVER_IP;   // fallback only while the IP dialog is showing
-
-const ROS_URL = 'ws://' + ROVER_HOST + ':9090';
-const ros = new ROSLIB.Ros({ url: ROS_URL });
-const statusEl = document.getElementById('ros-status');
-let rosState = 'init';
-let subs = [];
-let joyTopic = null;
-
-ros.on('connection', () => {
-    statusEl.textContent = 'ROS Connected';
-    statusEl.classList.add('connected');
-    const overlay = document.getElementById('connection-overlay');
-    if (overlay) overlay.style.display = 'none';
-    if (rosState !== 'up') notify('INFO', 'Connected to rosbridge.');
-    rosState = 'up';
-    subscribeAll();
-});
-ros.on('error', () => {
-    statusEl.textContent = 'Connection Error';
-    statusEl.classList.remove('connected');
-});
-ros.on('close', () => {
-    statusEl.textContent = 'Disconnected';
-    statusEl.classList.remove('connected');
-    const overlay = document.getElementById('connection-overlay');
-    if (overlay) overlay.style.display = 'flex';
-    if (rosState === 'up') notify('WARNING', 'Rosbridge connection lost. Retrying…');
-    else if (rosState === 'init') notify('ERROR', 'Unable to connect to rosbridge at ' + ROS_URL + '.');
-    rosState = 'down';
-    setTimeout(() => { try { ros.connect(ROS_URL); } catch (e) {} }, 5000);
-});
-
-function strip(f) { return (f || '').replace(/^\//, ''); }
-function quatYaw(q) {
-    return Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
-}
-
-function subscribeAll() {
-    subs.forEach(s => { try { s.unsubscribe(); } catch (e) {} });
-    subs = [];
-    const T = CFG.topics;
-
-    const mk = (name, type, cb) => {
-        const t = new ROSLIB.Topic({ ros, name, messageType: type });
-        t.subscribe(cb); subs.push(t); return t;
-    };
-
-    mk(T.map, 'nav_msgs/OccupancyGrid', (m) => {
-        latestMap = {
-            w: m.info.width, h: m.info.height, res: m.info.resolution,
-            ox: m.info.origin.position.x, oy: m.info.origin.position.y,
-            yaw: quatYaw(m.info.origin.orientation), data: m.data
-        };
-        mapImageDirty = true; needsDraw = true;
-    });
-
-    mk(T.plan, 'nav_msgs/Path', (m) => {
-        if (m && m.poses) {
-            latestPlan = m.poses.map(p => ({
-                x: p.pose.position.x,
-                y: p.pose.position.y,
-                yaw: quatYaw(p.pose.orientation)
-            }));
-            if (latestPlan.length > 0) {
-                if (navStatus === 'Idle') {
-                    navStatus = 'Navigating';
-                }
-                clearNavLoading();
-            }
-            needsDraw = true;
-        }
-    });
-
-    mk(T.odom, 'nav_msgs/Odometry', (m) => {
-        const v = m.twist.twist.linear;
-        odom = {
-            x: m.pose.pose.position.x, y: m.pose.pose.position.y,
-            yaw: quatYaw(m.pose.pose.orientation), speed: Math.hypot(v.x, v.y)
-        };
-        needsDraw = true;
-    });
-
-    mk(T.cmdVel, 'geometry_msgs/Twist', (m) => {
-        currentCmdVel = { linear: m.linear.x, angular: m.angular.z };
-        needsDraw = true;
-    });
-
-    const onTf = (m) => {
-        m.transforms.forEach(t => {
-            tfTree[strip(t.child_frame_id)] = {
-                parent: strip(t.header.frame_id),
-                x: t.transform.translation.x, y: t.transform.translation.y,
-                yaw: quatYaw(t.transform.rotation)
-            };
-        });
-        needsDraw = true;
-    };
-    mk(T.tf, 'tf2_msgs/TFMessage', onTf);
-    mk(T.tfStatic, 'tf2_msgs/TFMessage', onTf);
-
-    mk(T.joint, 'sensor_msgs/JointState', onJointState);
-
-    const cam = new ROSLIB.Topic({ ros, name: T.camera, messageType: 'sensor_msgs/Image', throttle_rate: 100, queue_length: 1 });
-    cam.subscribe(onCameraImage); subs.push(cam);
-
-    ros.getTopicType(T.cmd, (type) => {
-        if (!type) return;
-        mk(T.cmd, type, onCommand);
-    }, () => notify('WARNING', 'Command topic ' + T.cmd + ' not found; wheel command traces will be empty.'));
-
-    joyTopic = new ROSLIB.Topic({ ros, name: T.joy, messageType: 'sensor_msgs/Joy' });
-}
-
-function resolveRobotPose() {
-    for (const base of CFG.baseFrames) {
-        if (!tfTree[base]) continue;
-        let cur = base, acc = { x: 0, y: 0, yaw: 0 }, depth = 0;
-        while (cur !== CFG.mapFrame && depth++ < 12) {
-            const t = tfTree[cur];
-            if (!t) { acc = null; break; }
-            const c = Math.cos(t.yaw), s = Math.sin(t.yaw);
-            acc = { x: t.x + c * acc.x - s * acc.y, y: t.y + s * acc.x + c * acc.y, yaw: t.yaw + acc.yaw };
-            cur = t.parent;
-        }
-        if (acc && cur === CFG.mapFrame) return { x: acc.x, y: acc.y, yaw: acc.yaw, src: 'map' };
-    }
-    if (odom) return { x: odom.x, y: odom.y, yaw: odom.yaw, src: 'odom' };
-    return null;
-}
-
-function classifyJoint(name) {
-    if (CFG.jointOverrides[name]) return CFG.jointOverrides[name];
-    const n = name.toLowerCase();
-    if (/(^|[_\-])(fl|lf)([_\-]|$)|front[_\-]?left|left[_\-]?front/.test(n)) return 'fl';
-    if (/(^|[_\-])(fr|rf)([_\-]|$)|front[_\-]?right|right[_\-]?front/.test(n)) return 'fr';
-    if (/(^|[_\-])(bl|lb|rl|lr)([_\-]|$)|(rear|back)[_\-]?left|left[_\-]?(rear|back)/.test(n)) return 'bl';
-    if (/(^|[_\-])(br|rb|rr)([_\-]|$)|(rear|back)[_\-]?right|right[_\-]?(rear|back)/.test(n)) return 'br';
-    return null;
-}
 
 function formatSigned(v, digits = 2) {
     const n = Number(v);
     if (!Number.isFinite(n)) return '—';
     if (Math.abs(n) < 0.0005) return '0.' + '0'.repeat(digits);
     return (n > 0 ? '+' : '') + n.toFixed(digits);
-}
-
-function pushPoint(arr, v) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return;
-    const now = performance.now() / 1000;
-    arr.push({ t: now, v: n });
-    const cutoff = now - CFG.chartWindowSec - 5;
-    while (arr.length && arr[0].t < cutoff) arr.shift();
-}
-function onJointState(m) {
-    if (!m.velocity || !m.name) return;
-    m.name.forEach((n, i) => {
-        const id = classifyJoint(n);
-        if (id && typeof m.velocity[i] === 'number') pushPoint(series[id].a, m.velocity[i]);
-    });
-}
-function onCommand(m) {
-    if (!m.data) return;
-    CFG.cmdOrder.forEach((id, i) => { if (typeof m.data[i] === 'number') pushPoint(series[id].c, m.data[i]); });
-}
-
-const camCanvas = document.getElementById('cam-canvas');
-let lastCamFrame = 0;
-function onCameraImage(m) {
-    const w = m.width, h = m.height;
-    if (!w || !h) return;
-    const bin = atob(m.data), step = m.step || 0;
-    const enc = (m.encoding || '').toLowerCase();
-    const ch = { rgb8: 3, bgr8: 3, rgba8: 4, bgra8: 4, mono8: 1, '8uc1': 1, '8uc3': 3 }[enc];
-    if (!ch) {
-        if (!onCameraImage.warned) { onCameraImage.warned = true; notify('WARNING', 'Unsupported camera encoding: ' + m.encoding + '.'); }
-        return;
-    }
-    if (camCanvas.width !== w || camCanvas.height !== h) { camCanvas.width = w; camCanvas.height = h; }
-    const ctx = camCanvas.getContext('2d'), img = ctx.createImageData(w, h), d = img.data;
-    const stride = step || w * ch, swap = (enc === 'bgr8' || enc === 'bgra8');
-    for (let y = 0; y < h; y++) {
-        let si = y * stride, di = y * w * 4;
-        for (let x = 0; x < w; x++, si += ch, di += 4) {
-            if (ch === 1) { d[di] = d[di + 1] = d[di + 2] = bin.charCodeAt(si); }
-            else {
-                const r = bin.charCodeAt(si), g = bin.charCodeAt(si + 1), b = bin.charCodeAt(si + 2);
-                d[di] = swap ? b : r; d[di + 1] = g; d[di + 2] = swap ? r : b;
-            }
-            d[di + 3] = 255;
-        }
-    }
-    ctx.putImageData(img, 0, 0);
-    lastCamFrame = performance.now();
-    document.getElementById('cam-empty').style.display = 'none';
-    document.getElementById('cam-meta').textContent = '· ' + w + '×' + h;
 }
 
 const chartCanvases = {};
@@ -693,7 +461,6 @@ function drawMap() {
             ctx.fill();
             ctx.restore();
         }
-
         ctx.restore();
     }
 }
@@ -708,7 +475,6 @@ function openPoseActionPopup(pose, evt) {
     if (!popup || !pose) return;
 
     poseActionPopup = { x: pose.x, y: pose.y, yaw: pose.yaw || 0 };
-
     poseText.textContent =
         'X ' + pose.x.toFixed(2) +
         ' | Y ' + pose.y.toFixed(2) +
@@ -844,7 +610,6 @@ new ResizeObserver(() => { needsDraw = true; }).observe(mapWrap);
 
 let lastStatus = 0;
 function frame(ts) {
-    robot = resolveRobotPose();
     if (mapImageDirty && latestMap) {
         rebuildMapImage(); mapImageDirty = false;
         if (!viewFitted) fitMapView();
@@ -865,10 +630,6 @@ function calculateDistanceRemaining() {
 }
 
 function updateStatus() {
-    if (lastCamFrame && performance.now() - lastCamFrame > 3000) {
-        const e = document.getElementById('cam-empty');
-        e.textContent = 'No signal from /camera/image_raw'; e.style.display = 'flex';
-    }
     const spd = odom ? odom.speed : 0;
     document.getElementById('stat-speed').textContent = spd.toFixed(2);
 
@@ -942,14 +703,13 @@ function yawDegToQuaternion(yawDeg) {
     const r = (yawDeg * Math.PI) / 180;
     return { yaw_z: Math.sin(r / 2), yaw_w: Math.cos(r / 2) };
 }
+
+// MOCK API HOOKS
 async function postJSON(url, body) {
-    const r = await fetch("http://"+ROVER_HOST+":8000"+url, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body)
-    });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r;
+    console.log('[Mock API Call] POST', url, body);
+    return { ok: true };
 }
+
 async function withBusy(btn, fn) {
     if (btn) { if (btn.classList.contains('loading')) return; btn.classList.add('loading'); btn.disabled = true; }
     try { return await fn(); }
@@ -959,7 +719,6 @@ async function withBusy(btn, fn) {
 function run(btn, fn) { return withBusy(btn, fn); }
 function runNavButton(btn, fn) { return withBusy(btn, fn); }
 
-// Explicitly bind to window for inline HTML handlers
 window.run = run;
 window.runNavButton = runNavButton;
 
@@ -970,6 +729,7 @@ function readTarget() {
         yawDeg: parseFloat(document.getElementById('target-yaw').value) || 0
     };
 }
+
 async function sendGoalPose() {
     const btn = document.getElementById('nav-pose-btn');
     setNavLoading(btn);
@@ -978,18 +738,18 @@ async function sendGoalPose() {
     try {
         await postJSON('/navigate_to_pose', { x: t.x, y: t.y, yaw_deg: t.yawDeg });
         navStatus = 'Navigating';
-        notify('INFO', 'Navigation goal sent to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
+        notify('INFO', 'Mock Goal sent to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
     } catch (e) {
         clearNavLoading();
-        notify('ERROR', 'Failed to send navigation goal: ' + e.message);
+        notify('ERROR', 'Failed: ' + e.message);
     }
 }
 async function sendInitialPose() {
     const t = readTarget();
     try {
         await postJSON('/set_initial_pose', { x: t.x, y: t.y, yaw_deg: t.yawDeg });
-        notify('INFO', 'Initial pose set to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
-    } catch (e) { notify('ERROR', 'Failed to set initial pose: ' + e.message); }
+        notify('INFO', 'Mock Initial pose set to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
+    } catch (e) { notify('ERROR', 'Failed: ' + e.message); }
 }
 async function sendWaypoints() {
     if (waypointsData.length === 0) return notify('WARNING', 'No waypoints added. Click the map to add some.');
@@ -1000,7 +760,7 @@ async function sendWaypoints() {
     try {
         await postJSON('/follow_waypoints', { waypoints });
         navStatus = 'Navigating';
-        notify('INFO', 'Following ' + waypoints.length + ' waypoint(s).');
+        notify('INFO', 'Mock Following ' + waypoints.length + ' waypoint(s).');
     } catch (e) {
         clearNavLoading();
         notify('ERROR', 'Failed to send waypoints: ' + e.message);
@@ -1012,45 +772,42 @@ async function sendAbort() {
         navStatus = 'Aborted';
         latestPlan = [];
         clearNavLoading();
-        notify('WARNING', 'Mission abort requested.');
+        notify('WARNING', 'Mock Mission abort requested.');
     }
-    catch (e) { notify('ERROR', 'Failed to abort mission: ' + e.message); }
+    catch (e) { notify('ERROR', 'Failed: ' + e.message); }
 }
+
 async function saveCurrentMap() {
-    const mapName = document.getElementById('map-name-input').value;
-    if (!mapName) return notify('WARNING', 'Please enter a map name to save.');
-    try { await postJSON('/system/save_map', { map_name: mapName }); notify('INFO', 'Saving "' + mapName + '" map + SLAM continuation data…'); }
-    catch (e) { notify('ERROR', 'Failed to save map: ' + e.message); }
+    const mapName = document.getElementById('map-name-input').value || 'map';
+    notify('INFO', `Saving "${mapName}" map (PGM & YAML) and starting zip download...`);
+    
+    // Simulate ZIP file download in a new tab
+    const dummyZipData = 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
+    const newTab = window.open('', '_blank');
+    if (newTab) {
+        newTab.document.write(`
+            <html><head><title>Downloading Map...</title></head>
+            <body style="font-family: sans-serif; text-align: center; padding: 40px;">
+                <h3>Downloading package: ${mapName}.zip</h3>
+                <p>Includes PGM and YAML files.</p>
+                <script>
+                    const a = document.createElement('a');
+                    a.href = '${dummyZipData}';
+                    a.download = '${mapName}.zip';
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => window.close(), 3500); // Closes tab after download initiates
+                </script>
+            </body></html>
+        `);
+    }
 }
 
-let currentMode = null, pending = null, modeSelectTouched = false, modeTimer = null, polling = false;
-
-function normalizeMode(raw) {
-    if (raw === undefined || raw === null) return null;
-    const s = String(raw).toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, '');
-    if (['slam_update', 'slam_update_nav', 'continued_mapping', 'lifelong_mapping', 'lifelong'].includes(s)) return 'slam_update';
-    if (['slam_nav', 'slam_with_nav', 'slam_navigation', 'slam_and_nav', 'slam_nav2'].includes(s)) return 'slam_nav';
-    if (['slam', 'slam_only', 'mapping', 'mapping_only'].includes(s)) return 'slam';
-    if (['nav', 'nav_only', 'navigation', 'navigation_only', 'amcl', 'localization'].includes(s)) return 'nav';
-    if (['manual', 'teleop', 'joystick'].includes(s)) return 'manual';
-    return null;
-}
+let currentMode = null, pending = null, modeSelectTouched = false;
 
 async function fetchMode() {
-    const ctl = new AbortController();
-    const to = setTimeout(() => ctl.abort(), 4000);
-    try {
-        const r = await fetch("http://"+ROVER_HOST+":8000"+CFG.modeUrl, { cache: 'no-store', signal: ctl.signal });
-        if (!r.ok) return undefined;
-        const text = await r.text();
-        let raw = text;
-        try {
-            const j = JSON.parse(text);
-            raw = (j && typeof j === 'object') ? (j.mode ?? j.current_mode ?? j.system_mode) : j;
-        } catch (e) {}
-        return normalizeMode(raw);
-    } catch (e) { return undefined; }
-    finally { clearTimeout(to); }
+    console.log('[Mock API Call] Fetching mode');
+    return 'auto_nav';
 }
 
 function renderMode() {
@@ -1079,75 +836,37 @@ function setCurrentMode(m) {
 function clearPending() {
     if (pending) clearTimeout(pending.timer);
     pending = null; renderMode();
-    scheduleModePoll();
-}
-
-async function pollMode() {
-    if (polling) return;
-    polling = true;
-    try {
-        const m = await fetchMode();
-        if (m !== undefined) {
-            const prev = currentMode;
-            setCurrentMode(m);
-            if (pending && m === pending.target) {
-                const label = MODE_LABELS[m]; clearPending();
-                notify('INFO', 'Mode changed to ' + label + '.');
-            } else if (!pending && prev && m && prev !== m) {
-                notify('INFO', 'Mode is now ' + MODE_LABELS[m] + '.');
-            }
-        }
-    } finally { polling = false; }
-}
-
-function scheduleModePoll() {
-    clearTimeout(modeTimer);
-    modeTimer = setTimeout(async () => { await pollMode(); scheduleModePoll(); },
-        pending ? CFG.modePollMs : CFG.modeIdlePollMs);
 }
 
 async function applySystemMode() {
     if (pending) return;
     const mode = document.getElementById('sys-mode-select').value;
     const mapName = document.getElementById('map-name-input').value || 'small_warehouse';
-    if (mode === currentMode) return notify('INFO', 'Already in ' + MODE_LABELS[mode] + ' mode.');
-
-    const p = { target: mode, timer: null };
-    p.timer = setTimeout(async () => {
-        if (pending !== p) return;
-        const m = await fetchMode();
-        if (pending !== p) return;
-        if (m !== undefined) setCurrentMode(m);
-        const seconds = CFG.modeTimeoutMs / 1000;
-        if (m === p.target) { clearPending(); notify('INFO', 'Mode changed to ' + MODE_LABELS[mode] + '.'); }
-        else {
-            clearPending();
-            notify('ERROR', 'Mode change to ' + MODE_LABELS[mode] + ' timed out after ' + seconds + ' s. Current mode: ' +
-                (currentMode ? MODE_LABELS[currentMode] : 'unknown') + '.');
-        }
-    }, CFG.modeTimeoutMs);
-    pending = p; renderMode();
-    notify('INFO', 'Switching to ' + MODE_LABELS[mode] + '… waiting up to ' + (CFG.modeTimeoutMs / 1000) + ' s for confirmation.');
-    scheduleModePoll();
-
-    try { await postJSON(CFG.modeUrl, { mode, map_name: mapName }); }
-    catch (e) {
-        if (pending === p) { clearPending(); notify('ERROR', 'Mode request failed: ' + e.message); }
-    }
+    
+    setCurrentMode(mode);
+    notify('INFO', `Mock switched mode to ${MODE_LABELS[mode]} for map: ${mapName}`);
+    await postJSON('/system/mode', { mode, map_name: mapName });
 }
 
 const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
 const joy = { x: 0, y: 0, active: false, timer: null };
 
+// JOYSTICK ENABLE STATE
+let joyEnabled = false;
+window.toggleJoyEnable = function() {
+    joyEnabled = !joyEnabled;
+    const btn = document.getElementById('joy-enable-btn');
+    btn.textContent = joyEnabled ? 'Disable' : 'Enable';
+    btn.classList.toggle('btn-primary', joyEnabled);
+    btn.classList.toggle('btn-secondary', !joyEnabled);
+    notify('INFO', joyEnabled ? 'Joystick is now Enabled' : 'Joystick is now Disabled');
+};
+
 function publishJoy() {
-    if (!joyTopic || rosState !== 'up') return;
-    const ms = Date.now();
-    joyTopic.publish(new ROSLIB.Message({
-        header: { stamp: { sec: Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 }, frame_id: 'joy' },
-        axes: [-joy.x, -joy.y, 0, 0, 0, 0, 0, 0],
-        buttons: new Array(12).fill(0)
-    }));
+    if (!joyEnabled) return;
+    console.log(`[Mock Joy] Publishing x: ${joy.x.toFixed(2)}, y: ${joy.y.toFixed(2)}`);
 }
+
 function joyShow() {
     joyKnob.style.transform = 'translate(' + (joy.x * joyR()) + 'px,' + (joy.y * joyR()) + 'px)';
     document.getElementById('joy-x').textContent = (-joy.x).toFixed(2);
@@ -1161,6 +880,7 @@ function joyMove(evt) {
     if (mag > R) { dx *= R / mag; dy *= R / mag; }
     joy.x = dx / R; joy.y = dy / R; joyShow();
 }
+
 joyPad.addEventListener('pointerdown', (e) => {
     joyPad.setPointerCapture(e.pointerId); joyPad.classList.add('active');
     joy.active = true; joyMove(e);
@@ -1183,8 +903,11 @@ joyPad.addEventListener('pointercancel', joyEnd);
     let saved = null;
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');
-    renderMode();
-    pollMode().then(scheduleModePoll);
+    
+    // Setup Mock Mode on start
+    fetchMode().then(m => {
+        if (m) setCurrentMode(m);
+    });
     requestAnimationFrame(frame);
 })();
 
@@ -1272,34 +995,6 @@ let thinkingTimer = null;
 let thinkingStageIndex = 0;
 window.currentUtterance = null;
 
-// =====================================================================
-//  Physical eyes (Arduino Nano OLED, driven through commander_rest_api)
-// =====================================================================
-function pushEyes(type, extra) {
-    postJSON('/eyes/event', Object.assign({ type }, extra || {})).catch(() => {});
-}
-
-let speakPulseTimer = null;
-function startSpeakPulse() {
-    stopSpeakPulse();
-    speakPulseTimer = setInterval(() => {
-        if (!('speechSynthesis' in window) || !window.speechSynthesis.speaking) { stopSpeakPulse(); return; }
-        pushEyes('speaking', { level: 30 + Math.round(Math.random() * 60) });
-    }, 130);
-}
-function stopSpeakPulse() {
-    if (speakPulseTimer) clearInterval(speakPulseTimer);
-    speakPulseTimer = null;
-}
-
-// Occasional random "thought bubble" while idle/asleep, mirrored on the physical eyes.
-setInterval(() => {
-    if (agentState !== 'idle' && agentState !== 'asleep') return;
-    if (Math.random() > 0.15) return;
-    const thoughts = ['HMM...', 'WAITING', 'ALL GOOD', 'ANY TASK?'];
-    pushEyes('bubble', { text: thoughts[Math.floor(Math.random() * thoughts.length)] });
-}, 8000);
-
 const thinkingPanel = document.getElementById('thinking-panel');
 const thinkingStageText = document.getElementById('thinking-stage-text');
 
@@ -1346,8 +1041,8 @@ function appendHistory(sender, text) {
 }
 
 const SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
-const SILENCE_COMMIT_MS = 1200;   // no new words for this long after speaking -> send what we have
-const MAX_UTTERANCE_MS = 30000;   // hard cap on one listening session
+const SILENCE_COMMIT_MS = 1200;   
+const MAX_UTTERANCE_MS = 30000;   
 let lastText = '', lastResultAt = 0, listenStartedAt = 0, committed = false, silenceTimer = null;
 
 function clearListenTimers() {
@@ -1377,7 +1072,6 @@ function commitUtterance(text) {
     processVoiceCommand(text);
 }
 
-// pick the most confident alternative of a result
 function bestAlt(res) {
     let best = res[0];
     for (let j = 1; j < res.length; j++) if (res[j].confidence > best.confidence) best = res[j];
@@ -1409,14 +1103,13 @@ if (SpeechRecognitionImpl) {
     };
 
     recognition.onerror = (e) => {
-        if (e.error === 'aborted' || e.error === 'no-speech') return;   // onend decides what to do
+        if (e.error === 'aborted' || e.error === 'no-speech') return;   
         if (agentState !== 'listening') return;
         if (heardSpeech && lastText && !committed) { commitUtterance(lastText); return; }
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
             setRobotMood('listening', 'Error', `Microphone problem: ${e.error}`);
             setTimeout(closeVoiceModal, 3000);
         }
-        // network / other errors: onend restarts until the listen deadline, then sleeps
     };
 
     recognition.onresult = (event) => {
@@ -1434,17 +1127,16 @@ if (SpeechRecognitionImpl) {
         captionText.textContent = full;
 
         if (allFinal) commitUtterance(full);
-        else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);   // silence detected -> send
+        else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);   
     };
 
     recognition.onend = () => {
         if (agentState !== 'listening' || committed) return;
-        if (heardSpeech && lastText) { commitUtterance(lastText); return; }   // never leave words hanging
+        if (heardSpeech && lastText) { commitUtterance(lastText); return; }   
         if (Date.now() < listenDeadline - 300) startRecognition();
         else goToSleep();
     };
 
-    // Watchdog: nothing may leave the assistant stuck in "listening"
     setInterval(() => {
         if (agentState !== 'listening' || committed) return;
         const now = Date.now();
@@ -1463,23 +1155,6 @@ function setRobotMood(className, statusMsg, captionMsg) {
     if (statusMsg !== null) captionStatus.textContent = statusMsg;
     if (captionMsg !== null) {
         captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
-    }
-
-    if (className === 'listening') {
-        stopSpeakPulse();
-        pushEyes('listening', { level: 0 });
-    } else if (className === 'thinking') {
-        stopSpeakPulse();
-        pushEyes('thinking');
-    } else if (className === 'speaking') {
-        pushEyes('speaking', { level: 0 });
-        startSpeakPulse();
-    } else if (className === 'sleeping' || className === 'idle') {
-        stopSpeakPulse();
-        pushEyes('idle');
-    } else if (className === 'startled') {
-        stopSpeakPulse();
-        pushEyes('bubble', { text: 'YES?' });
     }
 }
 
@@ -1526,7 +1201,7 @@ function openVoiceModal() {
         window.currentUtterance = greetUtterance;
         window.currentSpokenText = greeting;
         window.speechSynthesis.speak(greetUtterance);
-        syncWake();   // wake word can interrupt the greeting
+        syncWake();   
     } else {
         agentState = 'listening';
         startRecognition();
@@ -1601,57 +1276,13 @@ async function processVoiceCommand(text) {
     startThinkingIndicator();
     playProcessingSound();
 
-    // Check if Hinglish mode is active
-    const isHinglish = document.getElementById('hinglish-toggle') && document.getElementById('hinglish-toggle').checked;
-    const baseMessage = `MAIN PROMPT: ${text}\nUSER INPUT FIELD: ${(document.getElementById('user-input').value || '').trim()}`;
-    
-    const payloadMessage = isHinglish 
-        ? `[CRITICAL INSTRUCTION: The user is speaking in Hinglish (Hindi written in English alphabet). Translate the user's query to English internally to understand it, formulate your response, and then TRANSLATE YOUR ENTIRE FINAL RESPONSE BACK TO HINGLISH. Your final output must be exclusively in Hinglish (Hindi words written with English letters) so the text-to-speech sounds like conversational Hindi.]\n\n${baseMessage}`
-        : baseMessage;
-
-    try {
-        const response = await fetch('http://' + ROVER_HOST + ':8001/agentic/waregv', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                call_id: currentCallId,
-                message: payloadMessage
-            })
-        });
-
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-
-        const data = await response.json();
+    // Mock API processing request delay
+    setTimeout(() => {
         stopThinkingIndicator();
-        const agentResponseText = data.output || "I didn't receive a valid response.";
-        
+        const agentResponseText = "Mock voice processing completed successfully.";
         appendHistory('agent', agentResponseText);
         speakAndLoop(agentResponseText);
-
-    } catch (err) {
-        stopThinkingIndicator();
-        const friendlyMsg = "Sorry, I am having trouble connecting. Try again later.";
-        appendHistory('agent', friendlyMsg);
-        speakThenClose(friendlyMsg);
-    }
-}
-
-function speakThenClose(text) {
-    agentState = 'speaking';
-    setRobotMood('speaking', 'Connection Error', text);
-
-    if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'en-US';
-        utterance.rate = 1.0;
-        utterance.onend = () => setTimeout(closeVoiceModal, 600);
-        window.currentUtterance = utterance;
-        window.currentSpokenText = text;
-        window.speechSynthesis.speak(utterance);
-    } else {
-        setTimeout(closeVoiceModal, 3000);
-    }
+    }, 2000);
 }
 
 function speakAndLoop(text) {
@@ -1662,14 +1293,12 @@ function speakAndLoop(text) {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         
-        // Assign Indian accent for Hinglish
         const isHinglish = document.getElementById('hinglish-toggle') && document.getElementById('hinglish-toggle').checked;
         utterance.lang = isHinglish ? 'hi-IN' : 'en-US'; 
         
         utterance.rate = 1.0;
         
         utterance.onend = () => {
-            // ignore end events from utterances that were cancelled / interrupted
             if (window.currentUtterance !== utterance || agentState !== 'speaking') return;
             if (modal.classList.contains('active')) {
                 agentState = 'listening';
@@ -1681,7 +1310,7 @@ function speakAndLoop(text) {
         window.currentUtterance = utterance;
         window.currentSpokenText = text;
         window.speechSynthesis.speak(utterance);
-        syncWake();   // say the wake word to interrupt
+        syncWake();   
     } else {
         setTimeout(closeVoiceModal, 4000); 
     }
@@ -1817,7 +1446,6 @@ if (SpeechRecognitionImpl) {
             for (let j = 0; j < res.length; j++) {
                 const t = res[j].transcript;
                 
-                // while Helio is talking: only a real, sustained human voice may interrupt
                 if (agentState === 'speaking') {
                     if (isEchoOfSpeech(t)) continue;
                     if (!bargeInAllowed()) continue;
@@ -1841,9 +1469,8 @@ function isEchoOfSpeech(t) {
     return hit / words.length >= 0.5;
 }
 
-// --- Barge-in gate: echo-cancelled mic + sustained loudness above own-voice residual ---
 let vadStream = null, vadCtx = null, vadAn = null, vadBuf = null, vadTimer = null;
-let vadResidual = 0.02, vadLoudSince = 0, vadLastLoud = 0, speakStartAt = 0, lastEyesLevelPush = 0;
+let vadResidual = 0.02, vadLoudSince = 0, vadLastLoud = 0, speakStartAt = 0;
 async function startVad() {
     if (vadTimer) return;
     speakStartAt = Date.now(); vadResidual = 0.02; vadLoudSince = 0; vadLastLoud = 0;
@@ -1864,32 +1491,25 @@ async function startVad() {
         const thr = Math.max(0.09, vadResidual * 3.5);
         if (rms > thr) {
             if (!vadLoudSince) vadLoudSince = now;
-            if (now - vadLoudSince > 450) vadLastLoud = now;   // sustained voice
+            if (now - vadLoudSince > 450) vadLastLoud = now;   
         } else {
             vadLoudSince = 0;
-            vadResidual = vadResidual * 0.97 + rms * 0.03;     // learn own-voice leakage
-        }
-        if (agentState === 'listening' && now - lastEyesLevelPush > 150) {
-            lastEyesLevelPush = now;
-            pushEyes('listening', { level: Math.min(100, Math.round(rms * 600)) });
+            vadResidual = vadResidual * 0.97 + rms * 0.03;     
         }
     }, 50);
 }
 function stopVad() { if (vadTimer) { clearInterval(vadTimer); vadTimer = null; } }
 function bargeInAllowed() {
-    if (Date.now() - speakStartAt < 1500) return false;        // ignore start-of-speech burst
-    if (!vadTimer) return false;                               // no VAD -> no voice barge-in (Stop button still works)
+    if (Date.now() - speakStartAt < 1500) return false;        
+    if (!vadTimer) return false;                               
     return Date.now() - vadLastLoud < 1500;
 }
-setInterval(() => {
-    if ((agentState === 'speaking' || agentState === 'listening') && modal.classList.contains('active')) startVad();
-    else stopVad();
-}, 300);
+setInterval(() => { if (agentState === 'speaking' && modal.classList.contains('active')) startVad(); else stopVad(); }, 300);
 
 function onWakeWord(initialText = '') {
     stopWake();
     if (modal.classList.contains('active')) {
-        window.currentUtterance = null;   // so the cancelled utterance's onend does nothing
+        window.currentUtterance = null;   
         if ('speechSynthesis' in window) window.speechSynthesis.cancel();
         stopThinkingIndicator();
         if (agentState === 'asleep') {
@@ -1898,7 +1518,6 @@ function onWakeWord(initialText = '') {
             agentState = 'listening';
             listenDeadline = Date.now() + LISTEN_TIMEOUT_MS; 
             
-            // Buffer the interrupted speech
             heardSpeech = !!initialText; 
             lastText = initialText;
             if (initialText) captionText.textContent = initialText;
@@ -1959,7 +1578,6 @@ function stopTalking() {
     notify('INFO', 'Announcer stopped.');
 }
 
-// --- Language Toggle Logic ---
 function setLang(lang) {
     const isHi = lang === 'hi';
     const toggle = document.getElementById('hinglish-toggle');

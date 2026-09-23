@@ -4,9 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WareGV Suite - Milusions</title>
-    <!-- ROS Web Libraries -->
-    <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/roslib@1.3.0/build/roslib.min.js"></script>
     <!-- Markdown Parser for Beautified Input/Output -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Roboto -->
@@ -15,15 +12,6 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
     <style>
-        #connection-overlay {
-            position: fixed; inset: 0; background: rgba(12, 13, 16, 0.85); z-index: 10000;
-            display: flex; align-items: center; justify-content: center; backdrop-filter: blur(6px);
-        }
-        .connection-popup {
-            width: 420px; max-width: 92vw; min-height: 256px; padding: 24px 28px; background: var(--panel); border: 2px solid var(--primary);
-            border-radius: 12px; display: flex; flex-direction: column; align-items: center; 
-            justify-content: center; box-shadow: 0 0 40px rgba(0, 119, 255, 0.2); text-align: center; gap: 10px;
-        }
         .map-estop-btn {
             position: absolute; top: 12px; right: 12px; z-index: 50;
             background: var(--danger); color: #fff; border: 2px solid #fff;
@@ -41,45 +29,6 @@
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20rx=%227.5%22%20fill=%22%23007bff%22/%3E%3Cg%20fill=%22%23fff%22%3E%3Crect%20x=%225.15%22%20y=%227%22%20width=%221.2%22%20height=%228%22%20rx=%22.6%22/%3E%3Ccircle%20cx=%225.75%22%20cy=%226.2%22%20r=%221.5%22/%3E%3Cpath%20d=%22M8%2011.5H21.5A5.5%205.5%200%200%201%2027%2017V21A1.5%201.5%200%200%201%2025.5%2022.5H6.5A1.5%201.5%200%200%201%205%2021V14.5A3%203%200%200%201%208%2011.5Z%22/%3E%3Crect%20x=%2223%22%20y=%2214.8%22%20width=%222.6%22%20height=%221.6%22%20rx=%22.5%22%20fill=%22%23007bff%22/%3E%3Ccircle%20cx=%2222.5%22%20cy=%2224%22%20r=%225%22/%3E%3Ccircle%20cx=%229.5%22%20cy=%2224%22%20r=%225%22/%3E%3C/g%3E%3Cg%20fill=%22%23007bff%22%3E%3Ccircle%20cx=%2222.5%22%20cy=%2224%22%20r=%222.3%22/%3E%3Ccircle%20cx=%229.5%22%20cy=%2224%22%20r=%222.3%22/%3E%3C/g%3E%3C/svg%3E">
 </head>
 <body class="light-theme">
-    <!-- Disconnection Popup Overlay -->
-    <div id="connection-overlay">
-        <div class="connection-popup">
-            <svg viewBox="0 0 24 24" style="width: 72px; height: 72px; color: var(--primary); position: relative;">
-                <path d="M4 14l2-4h12l2 4v4H4z" fill="currentColor" opacity="0.85" />
-                <rect x="7" y="8" width="10" height="4" rx="1" fill="currentColor" />
-                <circle cx="7" cy="18" r="2.5" fill="#14161a" stroke="currentColor" stroke-width="1.5" />
-                <circle cx="17" cy="18" r="2.5" fill="#14161a" stroke="currentColor" stroke-width="1.5" />
-                <line x1="12" y1="8" x2="15" y2="4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                <rect x="-10" y="-15" width="8" height="40" fill="rgba(255,255,255,0.8)" transform="rotate(25)">
-                    <animateTransform attributeName="transform" type="translate" from="-20 -20" to="60 40" dur="1.5s" repeatCount="indefinite"/>
-                </rect>
-            </svg>
-            <h3 style="margin: 0; color: var(--text); font-size: 1.2rem; font-weight: 600;">Connecting to rover...</h3>
-            <p style="margin: 0; color: var(--muted); font-size: 0.85rem;">Establishing ROS bridge</p>
-            <div class="ip-inline">
-                <input id="popup-rover-ip" class="ip-input" type="text" placeholder="Rover IP (e.g. 192.168.1.42)" autocomplete="off" spellcheck="false">
-                <button class="ip-btn" type="button" onclick="submitRoverIp('popup-rover-ip', 'popup-ip-error')">Update &amp; reload</button>
-            </div>
-            <div id="popup-ip-error" class="ip-error"></div>
-        </div>
-    </div>
-
-    <!-- Rover IP dialog (shown when localStorage "rover_ip" is missing) -->
-    <div id="rover-ip-dialog" class="rover-ip-dialog" hidden>
-        <div class="rover-ip-card" role="dialog" aria-modal="true" aria-labelledby="rover-ip-title">
-            <div class="rover-ip-head">
-                <div class="brand-logo" id="rover-ip-logo"></div>
-                <div>
-                    <h3 id="rover-ip-title">Connect to your rover</h3>
-                    <p>Milusions &middot; WareGV Suite</p>
-                </div>
-            </div>
-            <p>Enter the IP address or hostname of the rover. It is saved in this browser, so you only need to do this once.</p>
-            <input id="dialog-rover-ip" class="ip-input" type="text" placeholder="e.g. 192.168.1.42" autocomplete="off" spellcheck="false">
-            <div id="dialog-ip-error" class="ip-error"></div>
-            <button class="ip-btn" type="button" onclick="submitRoverIp('dialog-rover-ip', 'dialog-ip-error')">Connect</button>
-        </div>
-    </div>
 
     <!-- Voice Assistant Modal Overlay -->
     <div id="voice-modal" class="voice-modal">
@@ -111,7 +60,6 @@
                         SEND
                     </button>
                 </div>
-                <!-- Hinglish Toggle (hidden, manipulated by buttons above) -->
                 <div style="display: none; margin-top: 10px; align-items: center; gap: 6px;">
                     <input type="checkbox" id="hinglish-toggle">
                     <label for="hinglish-toggle" style="margin: 0; font-size: 0.75rem; color: var(--muted); text-transform: none; letter-spacing: normal;">Talk in Hindi (English writing)</label>
@@ -196,7 +144,7 @@
         <header class="header-bar">
             <div class="header-title"><h2>Autonomous Navigation Dashboard</h2></div>
             <div class="header-actions">
-                <span id="ros-status" class="status-badge">Disconnected</span>
+                <span id="ros-status" class="status-badge connected">UI Ready (Offline)</span>
                 <div class="wake-menu-wrap">
                     <button id="wake-btn" class="icon-btn wake-btn on" onclick="toggleWakeMenu(event)" aria-haspopup="menu" aria-expanded="false" title="Wake word settings">
                         <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z"/></svg>
@@ -267,7 +215,7 @@
                         </div>
 
                         <canvas id="map-canvas"></canvas>
-                        <div class="map-empty" id="map-empty">Waiting for /map…</div>
+                        <div class="map-empty" id="map-empty">Map Data Unavailable (Offline Mode)</div>
                         <div class="map-overlay mono" id="map-cursor">x —  y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
 
@@ -292,7 +240,7 @@
                 <div class="panel-hd"><span>Camera <span class="sub" id="cam-meta">/camera/image_raw</span></span></div>
                 <div class="cam-body">
                     <canvas id="cam-canvas" width="4" height="3"></canvas>
-                    <div class="map-empty" id="cam-empty">Waiting for /camera/image_raw…</div>
+                    <div class="map-empty" id="cam-empty">Camera Feed Offline</div>
                 </div>
             </section>
             <aside class="panel ctrl-panel">
@@ -303,8 +251,7 @@
                             <div class="sec-title">System Mode</div>
                             <div class="stack">
                                 <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
-                                    <option value="slam_update">Autonomous Driving + New Mapping</option>
-                                    <option value="manual">Manual (Joystick)</option>
+                                    <option value="auto_nav">Autonomous Navigation and Driving</option>
                                 </select>
                                 <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
                                 <input type="text" id="map-name-input" class="field" placeholder="Map name (e.g. warehouse)" value="small_warehouse">
@@ -346,7 +293,8 @@
                     <div class="panel-body">
                         <div class="joy-wrap">
                             <div class="joy-pad" id="joy-pad"><div class="joy-knob" id="joy-knob"></div></div>
-                            <div class="joy-read mono">
+                            <div class="joy-read mono" style="align-items: center;">
+                                <button id="joy-enable-btn" class="btn btn-secondary" style="height: 22px; padding: 0 8px; font-size: 0.65rem;" onclick="toggleJoyEnable()">Enable</button>
                                 <span>fwd <b id="joy-y">0.00</b></span>
                                 <span>turn <b id="joy-x">0.00</b></span>
                             </div>
@@ -377,20 +325,6 @@
 
     <script src="app.js"></script>
     <script>
-        window.addEventListener('DOMContentLoaded', () => {
-            setTimeout(() => {
-                const overlay = document.getElementById('connection-overlay');
-                if (ros && ros.isConnected) {
-                    if (overlay) overlay.style.display = 'none';
-                    const statusEl = document.getElementById('ros-status');
-                    if (statusEl) {
-                        statusEl.textContent = 'ROS Connected';
-                        statusEl.classList.add('connected');
-                    }
-                }
-            }, 300);
-        });
-
         // --- Navigation card on the map: keep its clicks/drags/scrolls away from the map handlers ---
         (function () {
             const card = document.getElementById('map-nav-card');
@@ -465,31 +399,6 @@
         window.addEventListener('load', centerHelioOnMap);
         if (window.ResizeObserver) new ResizeObserver(centerHelioOnMap).observe(document.querySelector('.p-map'));
         centerHelioOnMap();
-
-        // --- Rover IP (localStorage "rover_ip") ---
-        function submitRoverIp(inputId, errId) {
-            const input = document.getElementById(inputId), err = document.getElementById(errId);
-            const ip = normalizeRoverIp(input.value);
-            if (!isValidRoverHost(ip)) { err.textContent = 'Enter a valid IP address or hostname.'; input.focus(); return; }
-            saveRoverIpAndReload(ip);
-        }
-        ['popup-rover-ip', 'dialog-rover-ip'].forEach(id => {
-            const el = document.getElementById(id);
-            if (!el) return;
-            const errId = id === 'popup-rover-ip' ? 'popup-ip-error' : 'dialog-ip-error';
-            el.addEventListener('keydown', e => { if (e.key === 'Enter') submitRoverIp(id, errId); });
-            el.addEventListener('input', () => { document.getElementById(errId).textContent = ''; });
-        });
-        (function () {
-            const popupInput = document.getElementById('popup-rover-ip');
-            if (popupInput && ROVER_IP) popupInput.value = ROVER_IP;
-            if (!ROVER_IP) {
-                const logo = document.getElementById('rover-ip-logo'), src = document.querySelector('.sidebar .brand-logo');
-                if (logo && src) logo.innerHTML = src.innerHTML;
-                document.getElementById('rover-ip-dialog').hidden = false;
-                setTimeout(() => document.getElementById('dialog-rover-ip').focus(), 50);
-            }
-        })();
     </script>
 </body>
 </html>
