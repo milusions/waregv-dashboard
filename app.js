@@ -284,7 +284,7 @@ function drawArrow(ctx, x, y, yawRad, color, label, size) {
     ctx.beginPath(); ctx.moveTo(size + 9, 0); ctx.lineTo(size - 2, -6); ctx.lineTo(size - 2, 6); ctx.closePath(); ctx.fill();
     ctx.restore();
     ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill();
-    ctx.strokeStyle = theme['--panel']; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = theme['--panel']; ctx.lineWidth = 1.5; stroke();
     if (label) {
         ctx.font = '700 11px Roboto, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         ctx.fillStyle = color; ctx.fillText(label, p[0], p[1] - 9);
@@ -781,7 +781,6 @@ async function saveCurrentMap() {
     const mapName = document.getElementById('map-name-input').value || 'map';
     notify('INFO', `Saving "${mapName}" map (PGM & YAML) and starting zip download...`);
     
-    // Simulate ZIP file download in a new tab
     const dummyZipData = 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
     const newTab = window.open('', '_blank');
     if (newTab) {
@@ -986,8 +985,7 @@ let currentCallId = null;
 
 const modal = document.getElementById('voice-modal');
 const robotFace = document.getElementById('robot-face');
-const captionStatus = document.getElementById('caption-status');
-const captionText = document.getElementById('caption-text');
+const teleprompter = document.getElementById('teleprompter');
 const historyListEl = document.getElementById('history-list');
 
 let agentState = 'idle';
@@ -1067,7 +1065,12 @@ function commitUtterance(text) {
     if (text.length < 2) return;
     committed = true;
     clearListenTimers();
-    captionText.textContent = text;
+    
+    if (teleprompter) {
+        teleprompter.className = 'teleprompter user-speaking';
+        teleprompter.textContent = text;
+    }
+    
     appendHistory('you', text);
     processVoiceCommand(text);
 }
@@ -1124,7 +1127,11 @@ if (SpeechRecognitionImpl) {
 
         heardSpeech = true; lastText = full; lastResultAt = Date.now();
         clearListenTimers();
-        captionText.textContent = full;
+        
+        if (teleprompter) {
+            teleprompter.className = 'teleprompter user-speaking';
+            teleprompter.textContent = full;
+        }
 
         if (allFinal) commitUtterance(full);
         else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);   
@@ -1151,10 +1158,14 @@ if (SpeechRecognitionImpl) {
 }
 
 function setRobotMood(className, statusMsg, captionMsg) {
-    robotFace.className = 'robot-face ' + className;
-    if (statusMsg !== null) captionStatus.textContent = statusMsg;
-    if (captionMsg !== null) {
-        captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
+    if (robotFace) {
+        robotFace.className = 'robot-face ' + className;
+    }
+    if (teleprompter && captionMsg !== null) {
+        teleprompter.className = 'teleprompter helio-speaking';
+        teleprompter.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) 
+            ? marked.parse(captionMsg) 
+            : captionMsg;
     }
 }
 
@@ -1272,7 +1283,7 @@ async function processVoiceCommand(text) {
     clearListenTimers();
     try { recognition.stop(); } catch(e){}
 
-    setRobotMood('thinking', 'Processing', text);
+    setRobotMood('thinking', null, null); 
     startThinkingIndicator();
     playProcessingSound();
 
@@ -1380,7 +1391,10 @@ function setWakeWord(w) {
     try { localStorage.setItem('milusions-wake-word', w); } catch (e) {}
     updateWakeBtn();
     if (typeof modal !== 'undefined' && modal.classList.contains('active') && agentState === 'asleep') {
-        captionText.textContent = 'Say "' + wakeWord + '" to wake me up';
+        if (teleprompter) {
+            teleprompter.className = 'teleprompter helio-speaking';
+            teleprompter.textContent = 'Say "' + wakeWord + '" to wake me up';
+        }
     }
     notify('INFO', 'Wake word set to "' + wakeWord + '".');
 }
@@ -1520,9 +1534,17 @@ function onWakeWord(initialText = '') {
             
             heardSpeech = !!initialText; 
             lastText = initialText;
-            if (initialText) captionText.textContent = initialText;
+            
+            setRobotMood('listening', null, null);
+            
+            if (initialText && teleprompter) {
+                teleprompter.className = 'teleprompter user-speaking';
+                teleprompter.textContent = initialText;
+            } else if (!initialText && teleprompter) {
+                teleprompter.className = 'teleprompter helio-speaking';
+                teleprompter.textContent = 'Interrupted. Listening...';
+            }
 
-            setRobotMood('listening', 'Listening', 'Interrupted. Listening...');
             playStartupSound();
             setTimeout(() => { if (agentState === 'listening') startRecognition(); }, 220);
         }
