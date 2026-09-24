@@ -985,10 +985,6 @@ let listenDeadline = 0, heardSpeech = false;
 let currentCallId = null; 
 
 const modal = document.getElementById('voice-modal');
-const robotFace = document.getElementById('robot-face');
-const captionStatus = document.getElementById('caption-status');
-const captionText = document.getElementById('caption-text');
-const historyListEl = document.getElementById('history-list');
 
 let agentState = 'idle';
 let thinkingTimer = null;
@@ -999,6 +995,21 @@ const thinkingPanel = document.getElementById('thinking-panel');
 const thinkingStageText = document.getElementById('thinking-stage-text');
 
 const THINKING_STAGES = ['Analyzing prompt', 'Thinking...', 'Accessing rover', 'Finalizing'];
+
+// ROBUST SET MOOD FUNCTION (Fix for Uncaught TypeError)
+function setRobotMood(className, statusMsg, captionMsg) {
+    const rf = document.getElementById('robot-face');
+    const cs = document.getElementById('caption-status');
+    const ct = document.getElementById('caption-text');
+
+    if (rf) rf.className = 'robot-face ' + className;
+    if (cs && statusMsg !== null) cs.textContent = statusMsg;
+    if (ct && captionMsg !== null) {
+        ct.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) 
+            ? marked.parse(captionMsg) 
+            : captionMsg;
+    }
+}
 
 function startThinkingIndicator() {
     stopThinkingIndicator();
@@ -1020,6 +1031,8 @@ function stopThinkingIndicator() {
 }
 
 function appendHistory(sender, text) {
+    const historyListEl = document.getElementById('history-list');
+    if (!historyListEl) return;
     const item = document.createElement('div');
     item.className = `history-item ${sender}`;
     
@@ -1056,7 +1069,7 @@ function startRecognition(retry = true) {
     try { recognition.start(); }
     catch (e) {
         if (retry) setTimeout(() => {
-            if (modal.classList.contains('active') && (agentState === 'listening' || agentState === 'waking')) startRecognition(false);
+            if (modal && modal.classList.contains('active') && (agentState === 'listening' || agentState === 'waking')) startRecognition(false);
         }, 250);
     }
 }
@@ -1067,7 +1080,8 @@ function commitUtterance(text) {
     if (text.length < 2) return;
     committed = true;
     clearListenTimers();
-    captionText.textContent = text;
+    const captionText = document.getElementById('caption-text');
+    if(captionText) captionText.textContent = text;
     appendHistory('you', text);
     processVoiceCommand(text);
 }
@@ -1124,7 +1138,8 @@ if (SpeechRecognitionImpl) {
 
         heardSpeech = true; lastText = full; lastResultAt = Date.now();
         clearListenTimers();
-        captionText.textContent = full;
+        const captionText = document.getElementById('caption-text');
+        if (captionText) captionText.textContent = full;
 
         if (allFinal) commitUtterance(full);
         else silenceTimer = setTimeout(() => commitUtterance(lastText), SILENCE_COMMIT_MS);   
@@ -1150,19 +1165,11 @@ if (SpeechRecognitionImpl) {
     console.warn('Speech Recognition not supported in this browser.');
 }
 
-function setRobotMood(className, statusMsg, captionMsg) {
-    robotFace.className = 'robot-face ' + className;
-    if (statusMsg !== null) captionStatus.textContent = statusMsg;
-    if (captionMsg !== null) {
-        captionText.innerHTML = (typeof marked !== 'undefined' && captionMsg.length > 20) ? marked.parse(captionMsg) : captionMsg;
-    }
-}
-
 function openVoiceModal() {
     if (!recognition) return alert("Voice not supported on this browser.");
-    if (modal.classList.contains('active') && agentState === 'asleep') return wakeFromSleep();
+    if (modal && modal.classList.contains('active') && agentState === 'asleep') return wakeFromSleep();
     stopWake();
-    modal.classList.add('active');
+    if (modal) modal.classList.add('active');
     playStartupSound();
 
     const bubble = document.getElementById('speech-bubble');
@@ -1189,7 +1196,7 @@ function openVoiceModal() {
         const startListening = () => {
             if (listenStarted) return;
             listenStarted = true;
-            if (modal.classList.contains('active') && agentState === 'speaking') {
+            if (modal && modal.classList.contains('active') && agentState === 'speaking') {
                 agentState = 'listening';
                 startRecognition();
             }
@@ -1212,10 +1219,11 @@ function closeVoiceModal() {
     agentState = 'idle';
     listenDeadline = 0;
     clearListenTimers();
-    modal.classList.remove('active');
+    if (modal) modal.classList.remove('active');
     
     currentCallId = null;
-    historyListEl.innerHTML = '';
+    const historyListEl = document.getElementById('history-list');
+    if (historyListEl) historyListEl.innerHTML = '';
     const bubble = document.getElementById('speech-bubble');
     if (bubble) bubble.classList.remove('show');
 
@@ -1240,7 +1248,7 @@ async function sendManualText() {
         return;
     }
 
-    if (!modal.classList.contains('active')) {
+    if (modal && !modal.classList.contains('active')) {
         openVoiceModal();
     }
 
@@ -1300,7 +1308,7 @@ function speakAndLoop(text) {
         
         utterance.onend = () => {
             if (window.currentUtterance !== utterance || agentState !== 'speaking') return;
-            if (modal.classList.contains('active')) {
+            if (modal && modal.classList.contains('active')) {
                 agentState = 'listening';
                 setRobotMood('listening', 'Listening', 'Listening for next command...');
                 startRecognition();
@@ -1347,7 +1355,8 @@ function updateWakeBtn() {
     if (!btn) return;
     const on = wakeEnabled && !wakeBlocked;
     btn.classList.toggle('on', on); btn.classList.toggle('off', !on);
-    document.getElementById('wake-label').textContent = wakeWord;
+    const wl = document.getElementById('wake-label');
+    if (wl) wl.textContent = wakeWord;
     btn.title = 'Wake word "' + wakeWord + '": ' + (wakeBlocked ? 'blocked (microphone)' : (wakeEnabled ? 'on' : 'off'));
     renderWakeMenu();
 }
@@ -1379,8 +1388,9 @@ function setWakeWord(w) {
     wakeWord = w; buildWakeRe();
     try { localStorage.setItem('milusions-wake-word', w); } catch (e) {}
     updateWakeBtn();
-    if (typeof modal !== 'undefined' && modal.classList.contains('active') && agentState === 'asleep') {
-        captionText.textContent = 'Say "' + wakeWord + '" to wake me up';
+    const captionText = document.getElementById('caption-text');
+    if (typeof modal !== 'undefined' && modal && modal.classList.contains('active') && agentState === 'asleep') {
+        if(captionText) captionText.textContent = 'Say "' + wakeWord + '" to wake me up';
     }
     notify('INFO', 'Wake word set to "' + wakeWord + '".');
 }
@@ -1388,6 +1398,7 @@ function setWakeWord(w) {
 function toggleWakeMenu(ev) {
     ev.stopPropagation();
     const m = document.getElementById('wake-menu'), btn = document.getElementById('wake-btn');
+    if(!m || !btn) return;
     const open = m.hidden;
     m.hidden = !open;
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1402,7 +1413,7 @@ document.addEventListener('click', (e) => { if (!e.target.closest('.wake-menu-wr
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWakeMenu(); });
 
 function syncWake() {
-    const popupOpen = modal.classList.contains('active');
+    const popupOpen = modal && modal.classList.contains('active');
     const should = wakeEnabled && !wakeBlocked && SpeechRecognitionImpl && (!popupOpen || agentState === 'asleep' || agentState === 'speaking');
     if (should) startWake(); else stopWake();
 }
@@ -1504,11 +1515,11 @@ function bargeInAllowed() {
     if (!vadTimer) return false;                               
     return Date.now() - vadLastLoud < 1500;
 }
-setInterval(() => { if (agentState === 'speaking' && modal.classList.contains('active')) startVad(); else stopVad(); }, 300);
+setInterval(() => { if (agentState === 'speaking' && modal && modal.classList.contains('active')) startVad(); else stopVad(); }, 300);
 
 function onWakeWord(initialText = '') {
     stopWake();
-    if (modal.classList.contains('active')) {
+    if (modal && modal.classList.contains('active')) {
         window.currentUtterance = null;   
         if ('speechSynthesis' in window) window.speechSynthesis.cancel();
         stopThinkingIndicator();
@@ -1520,7 +1531,8 @@ function onWakeWord(initialText = '') {
             
             heardSpeech = !!initialText; 
             lastText = initialText;
-            if (initialText) captionText.textContent = initialText;
+            const captionText = document.getElementById('caption-text');
+            if (initialText && captionText) captionText.textContent = initialText;
 
             setRobotMood('listening', 'Listening', 'Interrupted. Listening...');
             playStartupSound();
@@ -1532,7 +1544,7 @@ function onWakeWord(initialText = '') {
 }
 
 function goToSleep() {
-    if (!modal.classList.contains('active') || agentState === 'asleep') return;
+    if (!modal || !modal.classList.contains('active') || agentState === 'asleep') return;
     agentState = 'asleep';
     listenDeadline = 0;
     clearListenTimers();
@@ -1554,7 +1566,7 @@ function wakeFromSleep() {
         setTimeout(() => bubble.classList.remove('show'), 2202);
     }
     setTimeout(() => {
-        if (modal.classList.contains('active') && agentState === 'waking') {
+        if (modal && modal.classList.contains('active') && agentState === 'waking') {
             try { recognition.start(); } catch (e) { console.log(e); }
         }
     }, 750);
