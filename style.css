@@ -1307,3 +1307,225 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
 .chart-full-btn{margin-left:8px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;font-size:12px;line-height:1;padding:3px 6px;cursor:pointer}
 .chart-full-btn:hover{color:var(--text);border-color:var(--muted)}
 .panel.chart-full{position:fixed;inset:12px;z-index:9999;height:auto!important;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+
+/* =====================================================================
+   VOICEMODAL REDESIGN OVERRIDES (Integrated from inline styles)
+   ===================================================================== */
+.map-estop-btn {
+    position: absolute; top: 12px; right: 12px; z-index: 50;
+    background: var(--danger); color: #fff; border: 2px solid #fff;
+    padding: 8px 14px; font-size: 0.8rem; font-weight: 800; border-radius: 6px; 
+    cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.4); text-transform: uppercase;
+}
+.map-estop-btn:hover { background: #ff1a4a; transform: scale(1.05); }
+.helio-fab-wrap {
+    position: fixed !important;
+    z-index: 9999 !important;
+    transform: translate(-50%, -50%) !important;
+}
+
+.voice-modal { 
+    background: rgba(0, 0, 0, 0.88) !important; 
+    backdrop-filter: blur(12px) !important; 
+}
+.modal-assistant-title { 
+    top: 2.5rem !important; 
+    left: 50% !important; 
+    transform: translateX(-50%) !important; 
+    font-size: 2.2rem !important; 
+    position: absolute; 
+    width: 100%; 
+    text-align: center; 
+    margin: 0; 
+    letter-spacing: 0.05em;
+}
+
+.modal-main-column { 
+    width: 100% !important; 
+    max-width: 100% !important; 
+    margin: 0 !important; 
+    align-items: center; 
+    justify-content: center; 
+    position: absolute; 
+    top: 50%; 
+    transform: translateY(-50%); 
+}
+
+/* Robot Face & Eyes Fixes */
+.robot-face {
+    background: transparent !important; 
+    border: none !important; 
+    box-shadow: none !important;
+    width: 100% !important; 
+    max-width: 100% !important; 
+    height: 240px !important; 
+    padding: 0 !important; 
+    gap: 75px; 
+    justify-content: center;
+    display: flex !important;
+    align-items: center !important;
+    cursor: pointer; 
+}
+@media (max-width: 640px) { .robot-face { gap: 40px; } }
+
+.robot-face.listening, .robot-face.thinking, .robot-face.speaking, .robot-face.startled { 
+    border: none !important; box-shadow: none !important; 
+}
+
+.robot-face .eye {
+    width: 110px !important; 
+    height: 160px !important;
+    border-radius: 60px !important;
+}
+.robot-face.speaking .eye {
+    height: 80px !important;
+    border-radius: 60px 60px 16px 16px !important;
+}
+.robot-face.sleeping .eye {
+    height: 12px !important;
+}
+
+.teleprompter {
+    margin-top: 50px; 
+    text-align: center; 
+    width: 100%; 
+    max-width: 800px; 
+    padding: 0 20px;
+    min-height: 40px; 
+    transition: all 0.3s ease;
+}
+.teleprompter.user-speaking { 
+    font-style: italic; 
+    color: #9ca3af; 
+    font-size: 1.3rem; 
+    font-weight: 400; 
+}
+.teleprompter.helio-speaking { 
+    font-style: normal; 
+    color: #ffffff; 
+    font-size: 1.7rem; 
+    font-weight: 600; 
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5); 
+}
+
+.helio-top-right { 
+    position: absolute; 
+    top: 2rem; 
+    right: 2.5rem; 
+    display: flex; 
+    align-items: center; 
+    gap: 14px; 
+    z-index: 1050; 
+}
+.helio-top-right .icon-btn {
+    width: 44px; height: 44px; 
+    border-radius: 50%; 
+    background: rgba(255,255,255,0.08); 
+    border: 1px solid rgba(255,255,255,0.15);
+    color: #fff; 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    cursor: pointer; 
+    transition: background 0.2s; 
+    font-size: 1.5rem;
+    padding: 0;
+}
+.helio-top-right .icon-btn:hover { background: rgba(255,255,255,0.18); }
+.helio-top-right .icon-btn svg { fill: #fff; width: 20px; height: 20px; }
+
+.lang-toggle-wrap.mini { 
+    margin: 0; 
+    background: rgba(255,255,255,0.08); 
+    border: 1px solid rgba(255,255,255,0.15); 
+    padding: 4px; 
+    border-radius: 24px; 
+    display: flex; 
+    gap: 4px; 
+    position: static; 
+}
+.lang-toggle-wrap.mini .lang-btn { 
+    background: transparent; 
+    color: #a1a1aa; 
+    border: none; 
+    padding: 6px 14px; 
+    border-radius: 16px; 
+    font-weight: 700; 
+    cursor: pointer; 
+    font-size: 0.85rem;
+}
+.lang-toggle-wrap.mini .lang-btn.active { 
+    background: var(--primary); 
+    color: #fff; 
+}
+
+.prompt-drawer {
+    position: absolute; 
+    top: 5.5rem; 
+    right: 2.5rem; 
+    background: #111827; 
+    border: 1px solid #374151; 
+    padding: 12px; 
+    border-radius: 12px;
+    display: flex; 
+    gap: 8px; 
+    width: 340px; 
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5); 
+    transform: translateY(-10px); 
+    opacity: 0;
+    pointer-events: none; 
+    transition: all 0.2s ease; 
+    z-index: 1040;
+}
+.prompt-drawer.show { 
+    transform: translateY(0); 
+    opacity: 1; 
+    pointer-events: auto; 
+}
+.prompt-drawer input { 
+    flex: 1; height: 40px; padding: 0 12px; border-radius: 8px; 
+    background: #1f2937; border: 1px solid #4b5563; color: #fff; 
+    font-family: inherit; font-size: 0.9rem; outline: none; 
+}
+.prompt-drawer input:focus { border-color: var(--primary); }
+.prompt-drawer button { 
+    height: 40px; padding: 0 16px; border-radius: 8px; 
+    background: var(--primary); color: #fff; border: none; 
+    font-weight: 700; cursor: pointer; font-size: 0.8rem; letter-spacing: 0.05em;
+}
+
+.modal-history-column {
+    position: absolute !important; 
+    right: 0 !important; 
+    top: 0 !important; 
+    bottom: 0 !important; 
+    width: 380px !important;
+    border-radius: 0 !important; 
+    border: none !important; 
+    border-left: 1px solid #1f2937 !important; 
+    background: rgba(11, 15, 25, 0.98) !important;
+    transform: translateX(100%) !important; 
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; 
+    z-index: 1060 !important;
+    box-shadow: -10px 0 30px rgba(0,0,0,0.5) !important; 
+    display: flex; 
+    flex-direction: column;
+}
+.modal-history-column.show { transform: translateX(0) !important; }
+.history-header { 
+    display: flex; justify-content: space-between; align-items: center; 
+    padding: 1.25rem 1.5rem; background: #111827; 
+    border-bottom: 1px solid #1f2937; font-size: 0.85rem; 
+    font-weight: 700; color: #cbd5e1; text-transform: uppercase; 
+    letter-spacing: 0.05em; flex: none;
+}
+.close-history-btn { 
+    background: none; border: none; color: #9ca3af; 
+    font-size: 1.8rem; cursor: pointer; padding: 0; line-height: 1; 
+}
+.close-history-btn:hover { color: #fff; }
+
+/* Clean up old UI */
+.user-input-wrap, .caption-container, #speech-bubble { display: none !important; }
+.think-dots { right: 50% !important; transform: translateX(120px) !important; top: 10% !important;}
+.thinking-panel { margin: 20px auto 0 !important; background: transparent !important; box-shadow: none !important; border: none !important; justify-content: center; }
