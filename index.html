@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WareGV Suite - Milusions</title>
-    <!-- Markdown Parser -->
+    <!-- Markdown Parser for Beautified Input/Output -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- ROSLib -->
+    <!-- ROSLib for ROS Bridge WebSocket -->
     <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
     <!-- Roboto -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -21,6 +21,11 @@
             cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.4); text-transform: uppercase;
         }
         .map-estop-btn:hover { background: #ff1a4a; transform: scale(1.05); }
+        .helio-fab-wrap {
+            position: fixed !important;
+            z-index: 9999 !important;
+            transform: translate(-50%, -50%) !important;
+        }
 
         /* --- VOICEMODAL REDESIGN OVERRIDES --- */
         .voice-modal { 
@@ -46,7 +51,7 @@
             align-items: center; 
             justify-content: center; 
             position: absolute; 
-            top: 48%; 
+            top: 50%; 
             transform: translateY(-50%); 
         }
         
@@ -60,38 +65,32 @@
             padding: 0 !important; 
             gap: 75px; 
             justify-content: center;
-            cursor: pointer; 
+            cursor: pointer; /* Click to stop talking */
         }
         @media (max-width: 640px) { .robot-face { gap: 40px; } }
+        .robot-face.listening, .robot-face.thinking, .robot-face.speaking, .robot-face.startled { 
+            border: none !important; box-shadow: none !important; 
+        }
         
         .teleprompter {
-            position: fixed !important;
-            bottom: 30px !important;
-            left: 50% !important;
-            transform: translateX(-50%) !important;
-            margin-top: 0 !important;
-            text-align: center;
-            width: min(800px, 90vw);
-            max-height: 150px;
-            overflow-y: auto;
-            padding: 12px 20px;
-            background: rgba(15, 23, 42, 0.75);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            backdrop-filter: blur(6px);
+            margin-top: 50px; 
+            text-align: center; 
+            width: 100%; 
+            max-width: 800px; 
+            padding: 0 20px;
+            min-height: 40px; 
             transition: all 0.3s ease;
-            z-index: 1010;
         }
         .teleprompter.user-speaking { 
             font-style: italic; 
             color: #9ca3af; 
-            font-size: 1.15rem; 
+            font-size: 1.3rem; 
             font-weight: 400; 
         }
         .teleprompter.helio-speaking { 
             font-style: normal; 
             color: #ffffff; 
-            font-size: 1.4rem; 
+            font-size: 1.7rem; 
             font-weight: 600; 
             text-shadow: 0 2px 10px rgba(0,0,0,0.5); 
         }
@@ -213,18 +212,22 @@
         }
         .close-history-btn:hover { color: #fff; }
         
+        /* Clean up old UI */
         .user-input-wrap, .caption-container, #speech-bubble { display: none !important; }
         .think-dots { right: 50% !important; transform: translateX(120px) !important; top: 10% !important;}
         .thinking-panel { margin: 20px auto 0 !important; background: transparent !important; box-shadow: none !important; border: none !important; justify-content: center; }
     </style>
+    <!-- Favicon (same vehicle logo as the sidebar) -->
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20rx=%227.5%22%20fill=%22%23007bff%22/%3E%3Cg%20fill=%22%23fff%22%3E%3Crect%20x=%225.15%22%20y=%227%22%20width=%221.2%22%20height=%228%22%20rx=%22.6%22/%3E%3Ccircle%20cx=%225.75%22%20cy=%226.2%22%20r=%221.5%22/%3E%3Cpath%20d=%22M8%2011.5H21.5A5.5%205.5%200%200%201%2027%2017V21A1.5%201.5%200%200%201%2025.5%2022.5H6.5A1.5%201.5%200%200%201%205%2021V14.5A3%203%200%200%201%208%2011.5Z%22/%3E%3Crect%20x=%2223%22%20y=%2214.8%22%20width=%222.6%22%20height=%221.6%22%20rx=%22.5%22%20fill=%22%23007bff%22/%3E%3Ccircle%20cx=%2222.5%22%20cy=%2224%22%20r=%225%22/%3E%3Ccircle%20cx=%229.5%22%20cy=%2224%22%20r=%225%22/%3E%3C/g%3E%3Cg%20fill=%22%23007bff%22%3E%3Ccircle%20cx=%2222.5%22%20cy=%2224%22%20r=%222.3%22/%3E%3Ccircle%20cx=%229.5%22%20cy=%2224%22%20r=%222.3%22/%3E%3C/g%3E%3C/svg%3E">
 </head>
 <body class="light-theme">
 
     <!-- Voice Assistant Modal Overlay -->
     <div id="voice-modal" class="voice-modal">
+        <!-- Top Center Title -->
         <div class="modal-assistant-title">Helio</div>
 
+        <!-- Top Right Toolset -->
         <div class="helio-top-right">
             <div class="lang-toggle-wrap mini">
                 <button id="btn-en" class="lang-btn active" onclick="setLang('en')">En</button>
@@ -239,32 +242,44 @@
             <button class="icon-btn" onclick="closeVoiceModal()" title="Close">&times;</button>
         </div>
 
+        <!-- Hidden Prompt Drawer -->
         <div id="prompt-drawer" class="prompt-drawer">
             <input id="user-input" type="text" placeholder="Type your command..." autocomplete="off">
             <button id="manual-send-btn" class="manual-send-btn" type="button" onclick="sendManualText()">SEND</button>
             <div style="display: none;"><input type="checkbox" id="hinglish-toggle"></div>
         </div>
 
+        <!-- Main Screen -->
         <div class="modal-main-column">
-            <div id="robot-face" class="robot-face listening" onclick="stopTalking()" title="Click to stop speaking">
-                <!-- Convex Cheeks Overlays -->
-                <div class="cheek left-cheek"></div>
-                <div class="cheek right-cheek"></div>
+            <div id="robot-face" class="robot-face listening" onclick="stopTalking()" title="Stop Helio speaking">
                 <div class="eye"></div>
                 <div class="eye"></div>
             </div>
-            
-            <div id="teleprompter" class="teleprompter"></div>
 
             <div id="thinking-panel" class="thinking-panel" aria-live="polite">
                 <span class="thinking-spinner" aria-hidden="true"></span>
-                <span id="thinking-stage-text">Analyzing prompt</span>
+                <span id="thinking-stage-text">Listening continuously...</span>
             </div>
-            
+
             <div class="zzz" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></div>
             <div class="think-dots" aria-hidden="true"><span></span><span></span><span></span></div>
         </div>
 
+        <!-- Persistent live transcription at the bottom. It grows without a fixed line limit. -->
+        <div class="voice-transcript-dock" aria-live="polite">
+            <div class="voice-transcript-head">
+                <span id="caption-status" class="caption-status">Listening continuously</span>
+                <span id="caption-hint" class="caption-hint">Keep talking — Helio will not auto-submit.</span>
+            </div>
+            <div id="caption-text" class="caption-text" role="log" aria-label="Live transcription">Speak whenever you are ready...</div>
+            <div class="voice-transcript-actions">
+                <button type="button" class="voice-action secondary" onclick="clearVoiceTranscript()">Clear</button>
+                <button type="button" class="voice-action primary" onclick="sendVoiceTranscript()">Send to Helio</button>
+                <button type="button" class="voice-action stop" onclick="finishVoiceInput()">Stop Listening</button>
+            </div>
+        </div>
+
+        <!-- Slide-out History Column -->
         <div id="modal-history-column" class="modal-history-column">
             <div class="history-header">
                 <span>Session History</span>
@@ -407,7 +422,10 @@
                         <div class="map-overlay mono" id="map-cursor">x —  y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
 
-                        <div id="map-pose-popup" class="map-pose-popup" role="dialog" aria-label="Map pose actions">
+                        <div id="map-pose-popup" class="map-pose-popup" role="dialog" aria-label="Map pose actions" 
+                             onpointerdown="event.stopPropagation()" 
+                             onpointerup="event.stopPropagation()" 
+                             onclick="event.stopPropagation()">
                             <button class="map-pose-popup-close" type="button" onclick="closePoseActionPopup()" aria-label="Close">&times;</button>
                             <div class="map-pose-popup-title">Pose selected</div>
                             <div id="map-pose-popup-pose" class="map-pose-popup-pose">X 0.00 | Y 0.00 | Yaw 0.0°</div>
@@ -419,51 +437,36 @@
                 </div>
             </section>
 
-            <!-- Mission Control & WebRTC Camera Streams -->
+            <!-- Mission Control -->
             <div class="col-ctrl">
-                <section class="panel video-panel">
-                    <div class="panel-hd">
-                        <span>RGB Camera <span class="sub" id="cam-meta">/camera/color/image_raw · WebRTC</span></span>
-                        <span class="video-state" id="rgb-webrtc-state">OFFLINE</span>
-                    </div>
-                    <div class="video-body">
-                        <video id="rgb-video" class="webrtc-video" autoplay playsinline muted></video>
-                        <div class="video-empty" id="rgb-video-empty">RGB WebRTC Feed Offline</div>
-                    </div>
-                </section>
-
-                <section class="panel video-panel">
-                    <div class="panel-hd">
-                        <span>Depth Camera <span class="sub" id="depth-meta">/camera/depth/image_rect_raw · WebRTC</span></span>
-                        <span class="video-state" id="depth-webrtc-state">OFFLINE</span>
-                    </div>
-                    <div class="video-body">
-                        <video id="depth-video" class="webrtc-video" autoplay playsinline muted></video>
-                        <div class="video-empty" id="depth-video-empty">Depth WebRTC Feed Offline</div>
-                    </div>
-                </section>
-
-                <aside class="panel ctrl-panel">
-                    <div class="panel-hd"><span>Mission Control</span></div>
-                    <div class="panel-body scroll">
-                        <div class="ctrl-body">
-                            <div>
-                                <div class="sec-title">System Mode</div>
-                                <div class="stack">
-                                    <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
-                                        <option value="auto_nav">Autonomous Navigation and Driving</option>
-                                    </select>
-                                    <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
-                                    <input type="text" id="map-name-input" class="field" placeholder="Map name (e.g. warehouse)" value="small_warehouse">
-                                    <div class="btn-row">
-                                        <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
-                                        <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
-                                    </div>
+            <section class="panel cam-panel">
+                <div class="panel-hd"><span>Camera <span class="sub" id="cam-meta">/camera/image_raw</span></span></div>
+                <div class="cam-body">
+                    <canvas id="cam-canvas" width="4" height="3"></canvas>
+                    <div class="map-empty" id="cam-empty">Camera Feed Offline</div>
+                </div>
+            </section>
+            <aside class="panel ctrl-panel">
+                <div class="panel-hd"><span>Mission Control</span></div>
+                <div class="panel-body scroll">
+                    <div class="ctrl-body">
+                        <div>
+                            <div class="sec-title">System Mode</div>
+                            <div class="stack">
+                                <select id="sys-mode-select" class="field" onchange="modeSelectTouched = true">
+                                    <option value="auto_nav">Autonomous Navigation and Driving</option>
+                                </select>
+                                <label style="display:block; font-size:0.66rem; font-weight:600; color:var(--muted); margin-bottom:3px; margin-top:6px;">Map Name</label>
+                                <input type="text" id="map-name-input" class="field" placeholder="Map name (e.g. warehouse)" value="small_warehouse">
+                                <div class="btn-row">
+                                    <button class="btn btn-primary" id="deploy-btn" onclick="applySystemMode()">Deploy Mode</button>
+                                    <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save Map</button>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </aside>
+                </div>
+            </aside>
             </div>
 
             <!-- Status + Joystick -->
@@ -505,10 +508,18 @@
 
             <!-- Wheel graphs -->
             <div class="graphs">
-                <section class="panel"><div class="panel-hd"><span>Front Left Wheel</span></div><div class="panel-body"><canvas class="chart-canvas" id="chart-fl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Front Right Wheel</span></div><div class="panel-body"><canvas class="chart-canvas" id="chart-fr"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel</span></div><div class="panel-body"><canvas class="chart-canvas" id="chart-bl"></canvas></div></section>
-                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel</span></div><div class="panel-body"><canvas class="chart-canvas" id="chart-br"></canvas></div></section>
+                <section class="panel"><div class="panel-hd"><span>Front Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                    <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fl-c">—</b></span></div></div>
+                    <div class="panel-body"><canvas class="chart-canvas" id="chart-fl"></canvas></div></section>
+                <section class="panel"><div class="panel-hd"><span>Front Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                    <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fr-a">—</b></span><span class="b"><i></i>cmd<b id="lg-fr-c">—</b></span></div></div>
+                    <div class="panel-body"><canvas class="chart-canvas" id="chart-fr"></canvas></div></section>
+                <section class="panel"><div class="panel-hd"><span>Rear Left Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                    <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-bl-a">—</b></span><span class="b"><i></i>cmd<b id="lg-bl-c">—</b></span></div></div>
+                    <div class="panel-body"><canvas class="chart-canvas" id="chart-bl"></canvas></div></section>
+                <section class="panel"><div class="panel-hd"><span>Rear Right Wheel <span class="mono" style="font-size:0.62rem;color:var(--muted)">(signed)</span></span>
+                    <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-br-a">—</b></span><span class="b"><i></i>cmd<b id="lg-br-c">—</b></span></div></div>
+                    <div class="panel-body"><canvas class="chart-canvas" id="chart-br"></canvas></div></section>
             </div>
         </main>
     </div>
@@ -517,11 +528,16 @@
 
     <script src="app.js"></script>
     <script>
+        // --- Navigation card on the map: keep its clicks/drags/scrolls away from the map handlers ---
         (function () {
             const card = document.getElementById('map-nav-card');
             if (!card) return;
             ['pointerup', 'pointermove', 'pointercancel', 'wheel', 'contextmenu'].forEach(t =>
                 card.addEventListener(t, e => e.stopPropagation()));
+            card.addEventListener('pointerdown', e => {
+                e.stopPropagation();
+                if (typeof closePoseActionPopup === 'function') closePoseActionPopup();
+            });
         })();
 
         function toggleNavCard() {
@@ -531,69 +547,8 @@
             btn.textContent = collapsed ? 'Show' : 'Hide';
         }
 
-        window.toggleHistory = function() {
-            const hist = document.getElementById('modal-history-column');
-            if(hist) hist.classList.toggle('show');
-        };
-        window.closeHistory = function() {
-            const hist = document.getElementById('modal-history-column');
-            if(hist) hist.classList.remove('show');
-        };
-        window.togglePrompt = function() {
-            const drawer = document.getElementById('prompt-drawer');
-            if(drawer) {
-                drawer.classList.toggle('show');
-                if (drawer.classList.contains('show')) {
-                    setTimeout(() => document.getElementById('user-input').focus(), 100);
-                }
-            }
-        };
+        // Helio UI behavior lives in app.js. Keep this file declarative.
 
-        const PEEK_MESSAGES = [
-            "Ever wondered if you could control a rover hands free?",
-            "Hey there how are you?",
-            "Controlling a rover i see!",
-            "Hey, whats this button!"
-        ];
-
-        function triggerHelioPeek() {
-            const peekContainer = document.getElementById('helio-peek');
-            const peekBubble = document.getElementById('peek-bubble');
-            if (!peekContainer || !peekBubble) return;
-            if (typeof modal !== 'undefined' && modal.classList.contains('active')) return;
-
-            const randomMsg = PEEK_MESSAGES[Math.floor(Math.random() * PEEK_MESSAGES.length)];
-            peekBubble.textContent = randomMsg;
-
-            peekContainer.classList.add('peeking');
-            peekBubble.classList.add('show');
-
-            setTimeout(() => {
-                peekBubble.textContent = "Check me out!";
-                peekContainer.classList.remove('peeking');
-                setTimeout(() => peekBubble.classList.remove('show'), 800);
-            }, 3500);
-        }
-
-        setInterval(triggerHelioPeek, 6000);
-        setTimeout(triggerHelioPeek, 1500);
-
-        function centerHelioOnMap() {
-            const map = document.querySelector('.p-map');
-            const wrap = document.querySelector('.helio-fab-wrap');
-            const header = document.querySelector('.header-bar');
-            if (!map || !wrap) return;
-
-            const r = map.getBoundingClientRect();
-            wrap.style.left = (r.left + r.width / 2) + 'px';
-            if (header) {
-                wrap.style.top = header.getBoundingClientRect().bottom + 'px';
-                wrap.style.transform = 'translate(-50%, -50%)';
-            }
-        }
-        window.addEventListener('resize', centerHelioOnMap);
-        window.addEventListener('load', centerHelioOnMap);
-        centerHelioOnMap();
     </script>
 </body>
 </html>
