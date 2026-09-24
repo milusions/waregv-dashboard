@@ -29,12 +29,6 @@ const wheelIds = ['fl', 'fr', 'bl', 'br'];
 const series = {};
 wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
-function formatSigned(v, digits = 2) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return '—';
-    return (n > 0 ? '+' : '') + n.toFixed(digits);
-}
-
 const chartCanvases = {};
 wheelIds.forEach(id => chartCanvases[id] = document.getElementById('chart-' + id));
 
@@ -60,10 +54,7 @@ function drawChart(id) {
 }
 setInterval(() => wheelIds.forEach(drawChart), 500);
 
-// Map variables & handlers
-let latestMap = null, latestPlan = [], navStatus = 'Idle', robot = null, odom = null;
-let currentCmdVel = { linear: 0, angular: 0 };
-const mapCanvas = document.getElementById('map-canvas');
+let navStatus = 'Idle';
 
 function updateStatus() {
     const statusEl = document.getElementById('stat-nav-status');
@@ -71,7 +62,9 @@ function updateStatus() {
 }
 setInterval(updateStatus, 200);
 
-// Voice & Assistant Logic with Real-Time Streaming Teleprompter & Auto-Scroll
+// =====================================================================
+//  Voice & Assistant Logic (Happy Blue Mode, Idle Chats & User Attention)
+// =====================================================================
 const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let modal = document.getElementById('voice-modal');
@@ -79,7 +72,22 @@ let robotFace = document.getElementById('robot-face');
 let teleprompter = document.getElementById('teleprompter');
 let historyListEl = document.getElementById('history-list');
 let agentState = 'idle';
-let thinkingTimer = null;
+let fullTranscript = '';
+let happyIdleTimer = null;
+let sleepTimeoutTimer = null;
+
+const SLEEP_TIMEOUT_MS = 30000; // 30 seconds of inactivity triggers sleep
+
+const ROVER_CHATS_AND_JOKES = [
+    "Scanning warehouse aisles... Everything looks smooth and clear!",
+    "Did you know? Autonomous rovers use LiDAR and SLAM to map unknown environments seamlessly.",
+    "Why did the autonomous robot cross the warehouse? To optimize the supply chain path!",
+    "My obstacle avoidance sensors are fully engaged and ready for action.",
+    "Joke time: Why do robots make great drivers? Because they never lose their train of thought—or their lane!",
+    "Calculating optimal trajectories... Navigation efficiency is at 100%!",
+    "Ready to roll out on your next waypoint command whenever you are!"
+];
+
 const thinkingPanel = document.getElementById('thinking-panel');
 const thinkingStageText = document.getElementById('thinking-stage-text');
 
@@ -108,45 +116,88 @@ function appendHistory(sender, text) {
     historyListEl.scrollTop = historyListEl.scrollHeight;
 }
 
-const SPEECH_LANG = 'en-US';
-let lastText = '', committed = false;
+// Start Happy Blue Idle loop between active speaking/listening and sleep timeout
+function startHappyIdleRoutine() {
+    stopHappyIdleRoutine();
+    
+    // Switch to Happy Blue mode after initial greeting
+    if (agentState === 'listening' && robotFace) {
+        robotFace.className = 'robot-face happy-blue';
+    }
+
+    // Periodic random autonomous rover chats and jokes
+    happyIdleTimer = setInterval(() => {
+        if (agentState === 'listening' && modal.classList.contains('active')) {
+            const randomMsg = ROVER_CHATS_AND_JOKES[Math.floor(Math.random() * ROVER_CHATS_AND_JOKES.length)];
+            if (teleprompter) {
+                teleprompter.className = 'teleprompter helio-speaking';
+                teleprompter.textContent = randomMsg;
+                teleprompter.scrollTop = teleprompter.scrollHeight;
+            }
+        }
+    }, 7000);
+
+    // Sleep timeout if user doesn't speak for long
+    if (sleepTimeoutTimer) clearTimeout(sleepTimeoutTimer);
+    sleepTimeoutTimer = setTimeout(() => {
+        if (agentState === 'listening' && modal.classList.contains('active')) {
+            goToSleep();
+        }
+    }, SLEEP_TIMEOUT_MS);
+}
+
+function stopHappyIdleRoutine() {
+    if (happyIdleTimer) { clearInterval(happyIdleTimer); happyIdleTimer = null; }
+    if (sleepTimeoutTimer) { clearTimeout(sleepTimeoutTimer); sleepTimeoutTimer = null; }
+}
 
 if (SpeechRecognitionImpl) {
     recognition = new SpeechRecognitionImpl();
-    recognition.continuous = true;       // Enables continuous transcription until you stop
-    recognition.interimResults = true;   // Streams interim words instantly like Claude/Gemini
+    recognition.continuous = true;   
+    recognition.interimResults = true;
 
     recognition.onstart = () => {
         agentState = 'listening';
-        committed = false;
-        if (robotFace) robotFace.className = 'robot-face listening';
+        startHappyIdleRoutine();
     };
 
     recognition.onresult = (event) => {
-        if (agentState !== 'listening' || committed) return;
-        let interimTranscript = '';
-        let finalTranscript = '';
+        if (agentState !== 'listening') return;
+        
+        // User is speaking! Stop happy routine, switch to curious/attentive mode, and reset sleep timer.
+        stopHappyIdleRoutine();
+        if (robotFace) robotFace.className = 'robot-face curious';
+        if (sleepTimeoutTimer) clearTimeout(sleepTimeoutTimer);
+
+        let interim = '';
+        let final = '';
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
             if (event.results[i].isFinal) {
-                finalTranscript += event.results[i][0].transcript;
+                final += event.results[i][0].transcript;
             } else {
-                interimTranscript += event.results[i][0].transcript;
+                interim += event.results[i][0].transcript;
             }
         }
 
-        const currentStreamText = finalTranscript || interimTranscript;
-        if (currentStreamText && teleprompter) {
-            teleprompter.className = 'teleprompter user-speaking';
-            teleprompter.textContent = currentStreamText;
-            // Auto-scroll the teleprompter down as the text length grows
-            teleprompter.scrollTop = teleprompter.scrollHeight;
-            lastText = currentStreamText;
+        if (final) {
+            fullTranscript += ' ' + final;
+            processVoiceCommand(final.trim());
         }
 
-        if (finalTranscript) {
-            commitUtterance(finalTranscript);
+        const displayString = (fullTranscript + ' ' + interim).trim();
+        if (displayString && teleprompter) {
+            teleprompter.className = 'teleprompter user-speaking';
+            teleprompter.textContent = displayString;
+            teleprompter.scrollTop = teleprompter.scrollHeight;
         }
+
+        // Restart sleep timeout countdown if user stops speaking temporarily
+        sleepTimeoutTimer = setTimeout(() => {
+            if (agentState === 'listening' && modal.classList.contains('active')) {
+                goToSleep();
+            }
+        }, SLEEP_TIMEOUT_MS);
     };
 
     recognition.onerror = (e) => {
@@ -154,37 +205,30 @@ if (SpeechRecognitionImpl) {
     };
 
     recognition.onend = () => {
-        if (agentState === 'listening' && !committed && lastText) {
-            commitUtterance(lastText);
+        if (agentState === 'listening' && modal.classList.contains('active')) {
+            try { recognition.start(); } catch(err){}
         }
     };
-}
-
-function commitUtterance(text) {
-    text = (text || '').trim();
-    if (committed || !text) return;
-    committed = true;
-    try { recognition.stop(); } catch(e){}
-
-    appendHistory('you', text);
-    processVoiceCommand(text);
 }
 
 function openVoiceModal() {
     if (!modal) return;
     modal.classList.add('active');
     agentState = 'listening';
-    if (robotFace) robotFace.className = 'robot-face listening';
-    if (teleprompter) teleprompter.textContent = 'Listening... Speak your command.';
+    fullTranscript = '';
+    if (robotFace) robotFace.className = 'robot-face happy-blue';
+    if (teleprompter) teleprompter.textContent = 'Hello! Blue mode active. Listening for commands...';
     if (recognition) {
         try { recognition.start(); } catch(e){}
     }
+    startHappyIdleRoutine();
 }
 
 function closeVoiceModal() {
     if (!modal) return;
     modal.classList.remove('active');
     agentState = 'idle';
+    stopHappyIdleRoutine();
     if (recognition) {
         try { recognition.stop(); } catch(e){}
     }
@@ -192,16 +236,20 @@ function closeVoiceModal() {
 }
 
 function processVoiceCommand(text) {
+    if (!text) return;
     agentState = 'thinking';
+    stopHappyIdleRoutine();
     if (robotFace) robotFace.className = 'robot-face thinking';
     startThinkingIndicator();
 
+    appendHistory('you', text);
+
     setTimeout(() => {
         stopThinkingIndicator();
-        const responseText = "Processed: " + text;
+        const responseText = "Processed command: " + text;
         appendHistory('agent', responseText);
         speakResponse(responseText);
-    }, 1500);
+    }, 1200);
 }
 
 function speakResponse(text) {
@@ -219,12 +267,26 @@ function speakResponse(text) {
         utterance.onend = () => {
             if (modal && modal.classList.contains('active')) {
                 agentState = 'listening';
-                if (robotFace) robotFace.className = 'robot-face listening';
+                fullTranscript = '';
+                if (robotFace) robotFace.className = 'robot-face happy-blue';
                 if (teleprompter) teleprompter.textContent = 'Listening again...';
                 try { recognition.start(); } catch(e){}
+                startHappyIdleRoutine();
             }
         };
         window.speechSynthesis.speak(utterance);
+    }
+}
+
+function goToSleep() {
+    if (!modal.classList.contains('active') || agentState === 'asleep') return;
+    agentState = 'asleep';
+    stopHappyIdleRoutine();
+    try { recognition.stop(); } catch (e) {}
+    if (robotFace) robotFace.className = 'robot-face sleeping';
+    if (teleprompter) {
+        teleprompter.className = 'teleprompter helio-speaking';
+        teleprompter.textContent = 'Zzz... Sleeping due to inactivity.';
     }
 }
 
@@ -232,9 +294,11 @@ function stopTalking() {
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopThinkingIndicator();
     agentState = 'listening';
-    if (robotFace) robotFace.className = 'robot-face listening';
-    if (teleprompter) teleprompter.textContent = 'Interrupted. Listening...';
+    fullTranscript = '';
+    if (robotFace) robotFace.className = 'robot-face happy-blue';
+    if (teleprompter) teleprompter.textContent = 'Interrupted. Back in happy mode...';
     try { recognition.start(); } catch(e){}
+    startHappyIdleRoutine();
 }
 
 function sendManualText() {
@@ -243,6 +307,97 @@ function sendManualText() {
     const txt = input.value.trim();
     input.value = '';
     if (!modal.classList.contains('active')) openVoiceModal();
-    appendHistory('you', txt);
     processVoiceCommand(txt);
 }
+
+// =====================================================================
+//  RealSense WebRTC Integration (RGB & Depth Streams)
+// =====================================================================
+const WEBRTC_CFG = {
+    signalUrl: window.WEBRTC_SIGNAL_URL ||
+        new URLSearchParams(window.location.search).get('webrtc') ||
+        `${window.location.protocol}//${window.location.hostname}:8081`,
+    reconnectMs: 1500
+};
+
+const webrtcStreams = {
+    rgb: {
+        video: document.getElementById('rgb-video'),
+        empty: document.getElementById('rgb-video-empty'),
+        state: document.getElementById('rgb-webrtc-state'),
+        panel: document.getElementById('rgb-video')?.closest('.video-panel'),
+        endpoint: '/offer/color', pc: null, retry: null
+    },
+    depth: {
+        video: document.getElementById('depth-video'),
+        empty: document.getElementById('depth-video-empty'),
+        state: document.getElementById('depth-webrtc-state'),
+        panel: document.getElementById('depth-video')?.closest('.video-panel'),
+        endpoint: '/offer/depth', pc: null, retry: null
+    }
+};
+
+function setWebRTCState(s, live, label) {
+    if (!s.state) return;
+    s.state.textContent = label || (live ? 'LIVE' : 'OFFLINE');
+    s.state.classList.toggle('live', !!live);
+    s.panel?.classList.toggle('live', !!live);
+}
+
+async function startWebRTCStream(kind) {
+    const s = webrtcStreams[kind];
+    if (!s || !s.video) return;
+    if (s.retry) { clearTimeout(s.retry); s.retry = null; }
+    if (s.pc) { try { s.pc.close(); } catch (_) {} s.pc = null; }
+    setWebRTCState(s, false, 'CONNECTING');
+
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    s.pc = pc;
+    pc.addTransceiver('video', { direction: 'recvonly' });
+
+    pc.ontrack = (event) => {
+        const stream = event.streams?.[0] || new MediaStream([event.track]);
+        s.video.srcObject = stream;
+        s.video.play().catch(() => {});
+        setWebRTCState(s, true, 'LIVE');
+    };
+    pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'connected') setWebRTCState(s, true, 'LIVE');
+        if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+            setWebRTCState(s, false, state.toUpperCase());
+            if (s.pc === pc) { try { pc.close(); } catch (_) {} s.pc = null; }
+            s.retry = setTimeout(() => startWebRTCStream(kind), WEBRTC_CFG.reconnectMs);
+        }
+    };
+
+    try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const response = await fetch(WEBRTC_CFG.signalUrl + s.endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+        });
+        if (!response.ok) throw new Error(`WebRTC signaling HTTP ${response.status}`);
+        await pc.setRemoteDescription(await response.json());
+    } catch (err) {
+        console.error(`[WebRTC:${kind}]`, err);
+        setWebRTCState(s, false, 'RETRYING');
+        try { pc.close(); } catch (_) {}
+        if (s.pc === pc) s.pc = null;
+        s.retry = setTimeout(() => startWebRTCStream(kind), WEBRTC_CFG.reconnectMs);
+    }
+}
+
+function startRealSenseWebRTC() {
+    startWebRTCStream('rgb');
+    startWebRTCStream('depth');
+}
+
+window.addEventListener('beforeunload', () => {
+    stopWebRTCStream('rgb');
+    stopWebRTCStream('depth');
+});
+
+setTimeout(startRealSenseWebRTC, 0);
