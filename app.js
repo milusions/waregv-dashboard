@@ -20,7 +20,7 @@ const ROVER_IP = _qs.get('rover') || window.ROVER_IP || window.location.hostname
 const REST_API_BASE = (_qs.get('api') || window.REST_API_BASE || `http://${ROVER_IP}:8000`).replace(/\/+$/, '');
 const ROSBRIDGE_WS_URL = _qs.get('ros') || window.ROSBRIDGE_WS_URL || `ws://${ROVER_IP}:9090`;
 const WEBRTC_SIGNAL_URL = (_qs.get('webrtc') || window.WEBRTC_SIGNAL_URL || `http://${ROVER_IP}:8081`).replace(/\/+$/, '');
-const HELIO_ENDPOINT = _qs.get('helio') || window.HELIO_ENDPOINT || '/helio/command';
+const HELIO_WS_URL = _qs.get('helio') || window.HELIO_WS_URL || `ws://${ROVER_IP}:8001/ws/helio`;
 
 const CFG = {
     chartWindowSec: 30,
@@ -43,7 +43,7 @@ const TOPICS = {
 };
 const MAP_FRAME = 'map';
 
-const MODE_LABELS = { auto_nav: 'Autonomous Navigation and Driving' };
+const MODE_LABELS = { auto_nav: 'Autonomous Driving and Mapping' };
 const modeLabel = (m) => MODE_LABELS[m] || String(m || 'Unknown');
 
 // =====================================================================
@@ -615,7 +615,7 @@ setInterval(() => wheelIds.forEach(drawChart), 100);
 const mapWrap = document.getElementById('map-wrapper');
 const mapCanvas = document.getElementById('map-canvas');
 const view = { vx: 0, vy: 0, s: 30 };
-let follow = false, viewFitted = false;
+let follow = true, viewFitted = false;
 let clickMode = 'single';
 let singleTarget = null;
 let waypointsData = [];
@@ -635,13 +635,122 @@ function fitMapView() {
     const { W, H } = mapSize();
     view.vx = (minX + maxX) / 2; view.vy = (minY + maxY) / 2;
     view.s = Math.max(2, Math.min(W / (maxY - minY || 1), H / (maxX - minX || 1)) * 0.94);
-    follow = false; document.getElementById('follow-btn').classList.remove('on');
+    follow = true; document.getElementById('follow-btn').classList.add('on');
     viewFitted = true; needsDraw = true;
 }
 function toggleFollow() {
     follow = !follow;
     document.getElementById('follow-btn').classList.toggle('on', follow);
     needsDraw = true;
+}
+
+function toggleSidebar() {
+    document.body.classList.toggle('sidebar-collapsed');
+    const button = document.getElementById('sidebar-toggle-btn');
+    const collapsed = document.body.classList.contains('sidebar-collapsed');
+    if (button) {
+        button.setAttribute('aria-label', collapsed ? 'Show navigation' : 'Hide navigation');
+        button.title = collapsed ? 'Show navigation' : 'Hide navigation';
+    }
+    requestAnimationFrame(() => {
+        mapImageDirty = true;
+        needsDraw = true;
+        if (typeof mvDraw === 'function') mvDraw();
+    });
+}
+
+function togglePanelFullscreen(panel, button) {
+    const isFullscreen = panel.classList.toggle('panel-fullscreen');
+    button.textContent = isFullscreen ? '×' : '⛶';
+    button.title = isFullscreen ? 'Exit fullscreen' : 'Fullscreen panel';
+    button.setAttribute('aria-label', button.title);
+    document.body.classList.toggle('panel-is-fullscreen', isFullscreen);
+    requestAnimationFrame(() => {
+        mapImageDirty = true;
+        needsDraw = true;
+        if (typeof mvDraw === 'function') mvDraw();
+    });
+}
+
+function setupPanelUtilities() {
+    const panels = Array.from(document.querySelectorAll('.panel'));
+    panels.forEach((panel, index) => {
+        const header = panel.querySelector(':scope > .panel-hd');
+        if (!header) return;
+        panel.dataset.panelId = panel.dataset.panelId || 'panel-' + index;
+        panel.draggable = false;
+
+        let tools = header.querySelector(':scope > .panel-tools');
+        if (!tools) {
+            tools = document.createElement('div');
+            tools.className = 'panel-tools';
+            header.appendChild(tools);
+        }
+        const dragHandle = document.createElement('button');
+        dragHandle.type = 'button';
+        dragHandle.className = 'panel-drag-handle';
+        dragHandle.textContent = '☰';
+        dragHandle.title = 'Press and drag to move panel';
+        dragHandle.setAttribute('aria-label', dragHandle.title);
+        dragHandle.draggable = true;
+        dragHandle.addEventListener('pointerdown', (event) => {
+            event.stopPropagation();
+            panel.classList.add('panel-move-armed');
+            dragHandle.classList.add('active');
+        });
+        dragHandle.addEventListener('click', (event) => event.stopPropagation());
+        dragHandle.addEventListener('dragstart', (event) => {
+            if (!panel.classList.contains('panel-move-armed')) {
+                event.preventDefault();
+                return;
+            }
+            panel.classList.add('panel-dragging');
+            document.querySelector('.workspace').classList.add('is-reordering');
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', panel.dataset.panelId);
+        });
+        dragHandle.addEventListener('dragend', () => {
+            panel.classList.remove('panel-dragging');
+            panel.classList.remove('panel-move-armed');
+            dragHandle.classList.remove('active');
+            document.querySelector('.workspace').classList.remove('is-reordering');
+            document.querySelectorAll('.panel-drop-target').forEach((item) => item.classList.remove('panel-drop-target'));
+        });
+        dragHandle.addEventListener('pointerup', () => {
+            if (!panel.classList.contains('panel-dragging')) {
+                panel.classList.remove('panel-move-armed');
+                dragHandle.classList.remove('active');
+            }
+        });
+        header.insertBefore(dragHandle, header.firstChild);
+
+        const fullscreen = document.createElement('button');
+        fullscreen.type = 'button';
+        fullscreen.className = 'tool-btn panel-action-btn';
+        fullscreen.textContent = '⛶';
+        fullscreen.title = 'Fullscreen panel';
+        fullscreen.setAttribute('aria-label', fullscreen.title);
+        fullscreen.draggable = false;
+        fullscreen.addEventListener('click', (event) => {
+            event.stopPropagation();
+            togglePanelFullscreen(panel, fullscreen);
+        });
+        tools.appendChild(fullscreen);
+
+        panel.addEventListener('dragover', (event) => {
+            const dragged = document.querySelector('.panel-dragging');
+            if (!dragged || dragged === panel || dragged.parentElement !== panel.parentElement) return;
+            event.preventDefault();
+            panel.classList.add('panel-drop-target');
+            const before = event.clientY < panel.getBoundingClientRect().top + panel.offsetHeight / 2;
+            panel.parentElement.insertBefore(dragged, before ? panel : panel.nextSibling);
+        });
+        panel.addEventListener('dragleave', () => panel.classList.remove('panel-drop-target'));
+        panel.addEventListener('drop', (event) => {
+            event.preventDefault();
+            panel.classList.remove('panel-drop-target');
+        });
+    });
 }
 
 function rebuildMapImage() {
@@ -862,12 +971,17 @@ function evtPos(evt) { const r = mapCanvas.getBoundingClientRect(); return [evt.
 
 let poseActionPopup = null;
 
-function openPoseActionPopup(pose, evt) {
+function openPoseActionPopup(pose, evt, waypointIndex = -1) {
     const popup = document.getElementById('map-pose-popup');
     const poseText = document.getElementById('map-pose-popup-pose');
+    const singleActions = document.getElementById('map-pose-single-actions');
+    const waypointActions = document.getElementById('map-pose-waypoint-actions');
     if (!popup || !pose) return;
 
-    poseActionPopup = { x: pose.x, y: pose.y, yaw: pose.yaw || 0 };
+    poseActionPopup = { x: pose.x, y: pose.y, yaw: pose.yaw || 0, waypointIndex };
+    const isWaypoint = waypointIndex >= 0;
+    if (singleActions) singleActions.hidden = isWaypoint;
+    if (waypointActions) waypointActions.hidden = !isWaypoint;
     poseText.textContent =
         'X ' + pose.x.toFixed(2) +
         ' | Y ' + pose.y.toFixed(2) +
@@ -921,6 +1035,18 @@ function popupAddWaypoint() {
     notify('INFO', 'Waypoint ' + waypointsData.length + ' added at (' + p.x.toFixed(2) + ', ' + p.y.toFixed(2) + ').');
 }
 
+function popupCancelWaypoint() {
+    if (!poseActionPopup || poseActionPopup.waypointIndex < 0) return;
+    const index = poseActionPopup.waypointIndex;
+    const removed = waypointsData[index];
+    closePoseActionPopup();
+    if (!removed) return;
+    waypointsData.splice(index, 1);
+    updateWaypointsUI();
+    needsDraw = true;
+    notify('INFO', 'Waypoint cancelled.');
+}
+
 document.addEventListener('pointerdown', (evt) => {
     const popup = document.getElementById('map-pose-popup');
     if (popup && popup.classList.contains('show') && !popup.contains(evt.target) && !mapWrap.contains(evt.target)) {
@@ -963,15 +1089,17 @@ const endPointer = (evt) => {
     if (!activeGoal) return;
     const g = activeGoal; activeGoal = null;
 
+    let waypointIndex = -1;
     if (clickMode === 'single') {
         singleTarget = g;
         updateUIInputs(g.x, g.y, g.yaw);
     } else {
         waypointsData.push(g);
+        waypointIndex = waypointsData.length - 1;
         updateWaypointsUI();
     }
     needsDraw = true;
-    openPoseActionPopup(g, evt);
+    openPoseActionPopup(g, evt, waypointIndex);
 };
 mapWrap.addEventListener('pointerup', endPointer);
 
@@ -1248,6 +1376,42 @@ async function saveCurrentMap() {
         } else {
             notify('ERROR', 'Save map failed: ' + e.message);
         }
+    }
+}
+
+function extractMapNames(data) {
+    const values = Array.isArray(data) ? data
+        : data && (data.maps || data.map_names || data.names || data.items) || [];
+    if (!Array.isArray(values)) return [];
+    return values.map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') return item.name || item.map_name || item.filename || '';
+        return '';
+    }).map((name) => String(name).trim()).filter(Boolean)
+        .map((name) => name.replace(/\.ya?ml$/i, '').replace(/\.zip$/i, ''))
+        .filter((name, index, list) => list.indexOf(name) === index);
+}
+
+async function loadMapNames() {
+    const select = document.getElementById('map-name-input');
+    if (!select) return;
+    const endpoints = ['/maps', '/map/list', '/maps/list'];
+    for (const endpoint of endpoints) {
+        try {
+            const response = await fetch(REST_API_BASE + endpoint, { cache: 'no-store' });
+            if (!response.ok) continue;
+            const names = extractMapNames(await response.json());
+            if (!names.length) continue;
+            const current = select.value || 'small_warehouse';
+            select.replaceChildren(...names.map((name) => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                return option;
+            }));
+            select.value = names.includes(current) ? current : names[0];
+            return;
+        } catch (_) {}
     }
 }
 
@@ -1790,6 +1954,8 @@ const robotFace = document.getElementById('robot-face');
 const teleprompter = document.getElementById('teleprompter');
 const captionStatus = document.getElementById('caption-status');
 const captionText = document.getElementById('caption-text');
+const helioMic = document.getElementById('helio-mic');
+const helioLiveLine = document.getElementById('helio-live-line');
 const historyListEl = document.getElementById('history-list');
 const thinkingPanel = document.getElementById('thinking-panel');
 const thinkingStageText = document.getElementById('thinking-stage-text');
@@ -1807,7 +1973,8 @@ let speechActive = false;
 let helioOpen = false;
 let agentState = 'idle';               // idle | listening | thinking | speaking
 let currentCallId = null;
-let selectedLanguage = 'en';
+let selectedLanguage = (navigator.language || '').toLowerCase().startsWith('hi') ? 'hi' : 'en';
+let wakeLanguageOverride = null;
 let thinkingTimer = null;
 let thinkingStageIndex = 0;
 let commandSeq = 0;
@@ -1816,6 +1983,25 @@ window.currentUtterance = null;
 
 const THINKING_STAGES = ['Processing command', 'Working...', 'Preparing response'];
 const speechLang = () => selectedLanguage === 'hi' ? 'hi-IN' : BASE_SPEECH_LANG;
+
+function detectSpeechLanguage(text) {
+    const value = String(text || '');
+    if (/\p{Script=Devanagari}/u.test(value)) return 'hi';
+    if (/[A-Za-z]/.test(value)) return 'en';
+    return selectedLanguage;
+}
+
+function applyDetectedLanguage(text) {
+    if (wakeLanguageOverride) {
+        selectedLanguage = wakeLanguageOverride;
+        if (recognition) recognition.lang = speechLang();
+        return;
+    }
+    const detected = detectSpeechLanguage(text);
+    if (detected === selectedLanguage) return;
+    selectedLanguage = detected;
+    if (recognition) recognition.lang = speechLang();
+}
 
 const PeekController = {
     messages: [
@@ -1854,28 +2040,76 @@ const PeekController = {
     }
 };
 
+const HelioIdleController = {
+    timer: null,
+    bubbleTimer: null,
+    phrases: ['I am here when you need me.', 'Checking the rover state...', 'Ready for your next command.'],
+    start() {
+        this.stop();
+        this.timer = setInterval(() => this.lookAround(), 1800);
+        this.bubbleTimer = setInterval(() => this.thought(), 9000);
+        this.lookAround();
+    },
+    stop() {
+        if (this.timer) clearInterval(this.timer);
+        if (this.bubbleTimer) clearInterval(this.bubbleTimer);
+        this.timer = null;
+        this.bubbleTimer = null;
+        const bubble = document.getElementById('helio-idle-bubble');
+        if (bubble) bubble.classList.remove('show');
+    },
+    lookAround() {
+        if (!helioOpen || agentState !== 'listening' || speechActive) return;
+        const face = document.getElementById('robot-face');
+        if (!face) return;
+        face.querySelectorAll('.eye').forEach((eye) => {
+            const x = Math.round((Math.random() * 2 - 1) * 42);
+            const y = Math.round((Math.random() * 2 - 1) * 28);
+            eye.style.transform = `translate(${x}px, ${y}px)`;
+        });
+        face.classList.toggle('happy', Math.random() > 0.72);
+    },
+    thought() {
+        if (!helioOpen || agentState !== 'listening' || speechActive) return;
+        const bubble = document.getElementById('helio-idle-bubble');
+        if (!bubble) return;
+        bubble.textContent = this.phrases[Math.floor(Math.random() * this.phrases.length)];
+        bubble.classList.add('show');
+        setTimeout(() => bubble.classList.remove('show'), 3200);
+    }
+};
+
 // ----- small UI helpers -----
 function setVoiceStatus(text, live = false) {
     if (!captionStatus) return;
-    captionStatus.textContent = text;
+    captionStatus.textContent = 'TRANSCRIPT';
     captionStatus.classList.toggle('live', live);
 }
 
 function renderTranscript(empty = 'Speak whenever you are ready...') {
-    if (!captionText) return;
     const value = [transcriptText.trim(), interimText.trim()].filter(Boolean).join(' ');
-    captionText.textContent = value || empty;
-    captionText.scrollTop = captionText.scrollHeight;          // long prompt: always follow the newest words
+    if (captionText) {
+        captionText.textContent = value || empty;
+        captionText.scrollTop = captionText.scrollHeight;
+    }
+    if (helioLiveLine) helioLiveLine.textContent = value || '';
 }
 
-function setFace(state) { if (robotFace) robotFace.className = 'robot-face ' + state; }
+function setFace(state) {
+    if (robotFace) robotFace.className = 'robot-face ' + state;
+    if (helioMic) helioMic.className = 'helio-mic ' + state;
+    if (state !== 'listening') HelioIdleController.stop();
+    else if (helioOpen) HelioIdleController.start();
+}
 
 // who: 'user' (grey, your words) | 'helio' (white, Helio's reply)
 function setTeleprompter(text, who) {
-    if (!teleprompter) return;
-    teleprompter.className = 'teleprompter ' + (who === 'helio' ? 'helio-speaking' : 'user-speaking');
-    teleprompter.textContent = text || '';
-    teleprompter.scrollTop = 0;
+    if (teleprompter) {
+        teleprompter.className = 'teleprompter ' + (who === 'helio' ? 'helio-speaking' : 'user-speaking');
+        teleprompter.textContent = text || '';
+        teleprompter.scrollTop = 0;
+    }
+    if (helioLiveLine) helioLiveLine.textContent = text || '';
 }
 
 function appendHistory(sender, text) {
@@ -2007,6 +2241,7 @@ function bindRecognition() {
             }
         }
         interimText = currentInterim;
+        applyDetectedLanguage([transcriptText, interimText].join(' '));
         speechActive = true;
         setVoiceStatus('LISTENING CONTINUOUSLY', true);
         renderTranscript();
@@ -2091,7 +2326,6 @@ function closeVoiceModal() {
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopThinkingIndicator();
     if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
-    currentCallId = null;
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
     renderTranscript();
     PeekController.start();
@@ -2115,6 +2349,7 @@ function speakText(text, opts) {
     return new Promise((resolve) => {
         const spoken = cleanForSpeech(text);
         if (!('speechSynthesis' in window) || !spoken) { resolve(); return; }
+        applyDetectedLanguage(spoken);
         let finished = false, wd = null;
         const finish = () => { if (finished) return; finished = true; clearTimeout(wd); resolve(); };
         try { window.speechSynthesis.cancel(); } catch (_) {}
@@ -2198,17 +2433,6 @@ function sendManualText() {
     commitTranscript();
 }
 
-function setLang(lang) {
-    selectedLanguage = lang === 'hi' ? 'hi' : 'en';
-    const en = document.getElementById('btn-en'), hi = document.getElementById('btn-hi');
-    if (en) en.classList.toggle('active', selectedLanguage === 'en');
-    if (hi) hi.classList.toggle('active', selectedLanguage === 'hi');
-    if (recognition) {
-        recognition.lang = speechLang();
-        if (helioOpen && agentState === 'listening') { recognitionStop(); scheduleRecognitionRestart(); }
-    }
-}
-
 window.toggleHistory = function () {
     const el = document.getElementById('modal-history-column'); if (el) el.classList.toggle('show');
 };
@@ -2234,11 +2458,13 @@ document.addEventListener('keydown', (event) => {
 
 // =====================================================================
 //  HELIO BRAIN
-//  1) POST the text to the rover's Helio endpoint (HELIO_ENDPOINT).
-//  2) If that endpoint does not exist or fails, the built-in command engine
-//     below drives the dashboard directly (navigate, waypoints, abort, ...).
+//  Helio runs as a persistent WebSocket agent at /ws/helio. The server owns
+//  the conversation ID and sends a final response for each user message.
 // =====================================================================
 let helioBackendDownUntil = 0;
+let helioSocket = null;
+let helioSocketConnectPromise = null;
+let helioPendingRequest = null;
 
 function pickReply(data) {
     if (!data) return '';
@@ -2247,34 +2473,100 @@ function pickReply(data) {
     return typeof v === 'string' ? v : '';
 }
 
-async function queryHelio(text) {
-    if (Date.now() >= helioBackendDownUntil) {
-        const ctrl = new AbortController();
-        const to = setTimeout(() => ctrl.abort(), HELIO_TIMEOUT_MS);
-        try {
-            const url = /^https?:/i.test(HELIO_ENDPOINT) ? HELIO_ENDPOINT : REST_API_BASE + HELIO_ENDPOINT;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text, message: text, lang: selectedLanguage, call_id: currentCallId }),
-                signal: ctrl.signal
-            });
-            if (res.ok) {
-                const raw = await res.text();
-                let data = raw;
-                try { data = JSON.parse(raw); } catch (_) {}
-                const reply = pickReply(data);
-                if (reply) return { text: reply, source: 'backend' };
-            } else {
-                helioBackendDownUntil = Date.now() + 60000;      // 404 etc: skip the endpoint for a minute
+function closeHelioSocket(reason) {
+    const socket = helioSocket;
+    helioSocket = null;
+    helioSocketConnectPromise = null;
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, reason || 'closed');
+}
+
+function connectHelioSocket() {
+    if (typeof WebSocket === 'undefined') return Promise.reject(new Error('WebSocket is unavailable.'));
+    if (helioSocket && helioSocket.readyState === WebSocket.OPEN) return Promise.resolve(helioSocket);
+    if (helioSocketConnectPromise) return helioSocketConnectPromise;
+
+    helioSocketConnectPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const socket = new WebSocket(HELIO_WS_URL);
+        helioSocket = socket;
+        const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { socket.close(); } catch (_) {}
+            reject(new Error('Helio WebSocket connection timed out.'));
+        }, HELIO_TIMEOUT_MS);
+
+        socket.onopen = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve(socket);
+        };
+        socket.onmessage = (event) => {
+            let data;
+            try { data = JSON.parse(event.data); } catch (_) { return; }
+            if (data.conversation_id) currentCallId = data.conversation_id;
+            if (data.type === 'final' && helioPendingRequest) {
+                const request = helioPendingRequest;
+                helioPendingRequest = null;
+                clearTimeout(request.timer);
+                request.resolve({ text: data.output || data.message || '', source: 'websocket' });
+            } else if (data.type === 'error' && helioPendingRequest) {
+                const request = helioPendingRequest;
+                helioPendingRequest = null;
+                clearTimeout(request.timer);
+                request.reject(new Error(data.message || 'Helio agent error.'));
             }
-        } catch (_) {
-            helioBackendDownUntil = Date.now() + 60000;
-        } finally {
-            clearTimeout(to);
-        }
+        };
+        socket.onerror = () => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timeout);
+                reject(new Error('Helio WebSocket connection failed.'));
+            }
+        };
+        socket.onclose = () => {
+            clearTimeout(timeout);
+            if (helioSocket === socket) {
+                helioSocket = null;
+                helioSocketConnectPromise = null;
+            }
+            if (helioPendingRequest) {
+                const request = helioPendingRequest;
+                helioPendingRequest = null;
+                clearTimeout(request.timer);
+                request.reject(new Error('Helio WebSocket disconnected.'));
+            }
+        };
+    }).finally(() => {
+        helioSocketConnectPromise = null;
+    });
+    return helioSocketConnectPromise;
+}
+
+async function queryHelio(text) {
+    if (Date.now() < helioBackendDownUntil) return localAssistant(text);
+    try {
+        const socket = await connectHelioSocket();
+        if (helioPendingRequest) throw new Error('Helio is already processing a request.');
+
+        const result = new Promise((resolve, reject) => {
+            const request = { resolve, reject, timer: null };
+            request.timer = setTimeout(() => {
+                if (helioPendingRequest === request) {
+                    helioPendingRequest = null;
+                    reject(new Error('Helio response timed out.'));
+                }
+            }, HELIO_TIMEOUT_MS);
+            helioPendingRequest = request;
+        });
+        socket.send(JSON.stringify({ type: 'message', message: text }));
+        return await result;
+    } catch (error) {
+        helioBackendDownUntil = Date.now() + 60000;
+        closeHelioSocket('request failed');
+        return localAssistant(text);
     }
-    return localAssistant(text);
 }
 
 function numbersIn(s) {
@@ -2371,15 +2663,19 @@ async function localAssistant(raw) {
 // =====================================================================
 //  Wake word  (dashboard-level: say the word and Helio opens by itself)
 // =====================================================================
-const WAKE_OPTIONS = { rover: ['rover'], helio: ['helio'], computer: ['computer'], car: ['car'], robot: ['robot'] };
-let wakeWord = 'rover';
+const WAKE_OPTIONS = { thor: ['thor'], jojo: ['jojo'] };
+let wakeWord = 'thor';
 let wakeEnabled = true;
 let wakeBlocked = false;
 let wakeRec = null, wakeRunning = false, wakeWanted = false, wakeRestartTimer = null, wakeRestartDelay = 300;
 try {
     const savedWord = localStorage.getItem('milusions-wake-word');
     const savedState = localStorage.getItem('milusions-wake');
-    if (savedWord && WAKE_OPTIONS[savedWord]) wakeWord = savedWord;
+    if (savedWord && WAKE_OPTIONS[savedWord]) {
+        wakeWord = savedWord;
+        wakeLanguageOverride = savedWord === 'jojo' ? 'hi' : 'en';
+        selectedLanguage = wakeLanguageOverride;
+    }
     if (savedState === 'off') wakeEnabled = false;
 } catch (_) {}
 
@@ -2391,9 +2687,11 @@ function renderWakeMenu() {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = key === wakeWord ? 'sel' : '';
-        button.textContent = key;
+        button.textContent = key === 'jojo' ? 'JoJo' : 'Thor';
         button.onclick = () => {
             wakeWord = key;
+            wakeLanguageOverride = key === 'jojo' ? 'hi' : 'en';
+            selectedLanguage = wakeLanguageOverride;
             try { localStorage.setItem('milusions-wake-word', key); } catch (_) {}
             updateWakeBtn(); closeWakeMenu();
         };
@@ -2411,7 +2709,7 @@ function renderWakeMenu() {
 function updateWakeBtn() {
     const btn = document.getElementById('wake-btn');
     const label = document.getElementById('wake-label');
-    if (label) label.textContent = wakeWord;
+    if (label) label.textContent = wakeWord === 'jojo' ? 'JoJo' : 'Thor';
     const on = wakeEnabled && !wakeBlocked;
     if (btn) {
         btn.classList.toggle('on', on); btn.classList.toggle('off', !on);
@@ -2480,20 +2778,29 @@ function bindWake() {
     };
     wakeRec.onresult = (ev) => {
         wakeRestartDelay = 300;
-        const re = new RegExp('\\b' + wakeWord + '\\b', 'i');
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            if (re.test(ev.results[i][0].transcript)) { openVoiceModal(); return; }
+            const heard = ev.results[i][0].transcript || '';
+            const re = new RegExp('\\b' + wakeWord + '\\b', 'i');
+            if (re.test(heard)) {
+                wakeLanguageOverride = wakeWord === 'jojo' ? 'hi' : 'en';
+                selectedLanguage = wakeLanguageOverride;
+                if (recognition) recognition.lang = speechLang();
+                openVoiceModal();
+                return;
+            }
         }
     };
 }
 
-// =====================================================================
-//  INIT
-// =====================================================================
 (function init() {
     let saved = null;
     try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
     applyTheme(saved !== 'dark');
+
+    setupPanelUtilities();
+    const followButton = document.getElementById('follow-btn');
+    if (followButton) followButton.classList.toggle('on', follow);
+    loadMapNames();
 
     updateWaypointsUI();
     setClickMode('single');
