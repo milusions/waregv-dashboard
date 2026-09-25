@@ -358,7 +358,6 @@ function onWheelStates(msg) {
 }
 
 // ----- /joint_states (sensor_msgs/JointState): the real source of wheel motor data -----
-// Maps whatever the joint is named (front_left_wheel_joint, wheel_fl, fl_joint, ...) to fl/fr/bl/br.
 function matchWheelIdFromJointName(name) {
     const n = String(name || '').toLowerCase();
     const isFront = /front|\bfl\b|\bfr\b|_f_|^f_|_f$/.test(n) && !/rear|back/.test(n);
@@ -382,7 +381,6 @@ function onJointStates(msg) {
     names.forEach((name, idx) => {
         const id = matchWheelIdFromJointName(name);
         if (!id) return;
-        // Prefer velocity (rad/s or m/s, matches "actual" wheel speed); fall back to position delta.
         const v = vel.length ? Number(vel[idx]) : NaN;
         const p = pos.length ? Number(pos[idx]) : NaN;
         const value = Number.isFinite(v) ? v : p;
@@ -390,11 +388,47 @@ function onJointStates(msg) {
     });
 }
 
-// ----- Local / global costmaps (nav_msgs/OccupancyGrid), rendered as toggleable overlays -----
+// ----- Local / global costmaps (nav_msgs/OccupancyGrid), rendered as toggleable overlays with Foxglove-style colormap -----
 let latestLocalCostmap = null, latestGlobalCostmap = null;
 let localCostmapDirty = false, globalCostmapDirty = false;
 const localCostmapCanvasOff = document.createElement('canvas');
 const globalCostmapCanvasOff = document.createElement('canvas');
+
+function getCostmapColor(v) {
+    if (v <= 0 || v === 255 || v === -1) return [0, 0, 0, 0];
+    if (v >= 100) return [227, 0, 53, 220]; // Lethal obstacle (bright red)
+    const t = Math.min(v, 99) / 99;
+    let r, g, b;
+    if (t < 0.33) {
+        const f = t / 0.33;
+        r = 0; g = Math.round(200 * f); b = 255;
+    } else if (t < 0.66) {
+        const f = (t - 0.33) / 0.33;
+        r = Math.round(255 * f); g = 200; b = Math.round(255 * (1 - f));
+    } else {
+        const f = (t - 0.66) / 0.34;
+        r = 255; g = Math.round(200 * (1 - f)); b = 0;
+    }
+    const alpha = Math.round(70 + t * 150);
+    return [r, g, b, alpha];
+}
+
+function rebuildCostmapImage(costmap, canvasOff) {
+    if (!costmap) return;
+    canvasOff.width = costmap.w; canvasOff.height = costmap.h;
+    const ctx = canvasOff.getContext('2d');
+    const img = ctx.createImageData(costmap.w, costmap.h), d = img.data;
+    for (let j = 0; j < costmap.h; j++) {
+        for (let i = 0; i < costmap.w; i++) {
+            const v = costmap.data[j * costmap.w + i], k = (j * costmap.w + i) * 4;
+            const [r, g, b, a] = getCostmapColor(v);
+            d[k] = r; d[k + 1] = g; d[k + 2] = b; d[k + 3] = a;
+        }
+    }
+    ctx.putImageData(img, 0, 0);
+}
+function rebuildLocalCostmapImage() { rebuildCostmapImage(latestLocalCostmap, localCostmapCanvasOff); }
+function rebuildGlobalCostmapImage() { rebuildCostmapImage(latestGlobalCostmap, globalCostmapCanvasOff); }
 
 function onLocalCostmapMsg(msg) {
     const info = msg.info;
@@ -417,28 +451,6 @@ function onGlobalCostmapMsg(msg) {
     };
     globalCostmapDirty = true; needsDraw = true;
 }
-
-function rebuildCostmapImage(costmap, canvasOff, rgb) {
-    if (!costmap) return;
-    canvasOff.width = costmap.w; canvasOff.height = costmap.h;
-    const ctx = canvasOff.getContext('2d');
-    const img = ctx.createImageData(costmap.w, costmap.h), d = img.data;
-    for (let j = 0; j < costmap.h; j++) {
-        for (let i = 0; i < costmap.w; i++) {
-            const v = costmap.data[j * costmap.w + i], k = (j * costmap.w + i) * 4;
-            // Only paint cost > 0; unknown (-1) and free (0) stay transparent so the
-            // base map shows through and the overlay reads as "where the cost is".
-            if (v > 0) {
-                const t = Math.min(v, 100) / 100;
-                d[k] = rgb[0]; d[k + 1] = rgb[1]; d[k + 2] = rgb[2];
-                d[k + 3] = Math.round(60 + t * 150);
-            }
-        }
-    }
-    ctx.putImageData(img, 0, 0);
-}
-function rebuildLocalCostmapImage() { rebuildCostmapImage(latestLocalCostmap, localCostmapCanvasOff, [255, 140, 0]); }   // orange
-function rebuildGlobalCostmapImage() { rebuildCostmapImage(latestGlobalCostmap, globalCostmapCanvasOff, [156, 39, 176]); } // purple
 
 function onMapMsg(msg) {
     const info = msg.info;
@@ -473,11 +485,10 @@ function onPlanMsg(msg) {
         x: p.pose.position.x, y: p.pose.position.y, yaw: yawFromQuat(p.pose.orientation)
     }));
     if (latestPlan.length > 1) {
-        // Nav2 answered: stop the spinner and the watchdog
         clearNavLoading();
         if (navStatus !== 'Navigating') {
             navStatus = 'Navigating';
-            if (!missionGoal) {                       // a goal sent by another client
+            if (!missionGoal) {
                 const last = latestPlan[latestPlan.length - 1];
                 missionGoal = { x: last.x, y: last.y };
             }
@@ -569,8 +580,6 @@ async function postJSON(urlPath, body = {}) {
 
 // =====================================================================
 //  REALSENSE WEBRTC VIDEO
-//  Two independent PeerConnections: RGB (/offer/color) and Depth (/offer/depth),
-//  matching camera_webrtc_streamer.py. Media never travels through rosbridge.
 // =====================================================================
 const WEBRTC_CFG = { signalUrl: WEBRTC_SIGNAL_URL, baseRetryMs: 1500, maxRetryMs: 8000 };
 
@@ -624,7 +633,7 @@ async function startWebRTCStream(kind) {
     if (s.pc) { try { s.pc.close(); } catch (_) {} s.pc = null; }
     setWebRTCState(s, false, 'CONNECTING');
 
-    const pc = new RTCPeerConnection({ iceServers: [] });   // rover is on the LAN
+    const pc = new RTCPeerConnection({ iceServers: [] });
     s.pc = pc;
     pc.addTransceiver('video', { direction: 'recvonly' });
 
@@ -927,8 +936,6 @@ function rebuildMapImage() {
         return c.getImageData(0, 0, 1, 1).data;
     };
     const free = parse(theme['--map-free']), occ = parse(theme['--map-occ']);
-    // Hard threshold instead of a grey gradient: cells read clearly as free or
-    // occupied (occupancy-grid convention: 0 = free, 100 = occupied, <0 = unknown).
     const OCC_THRESHOLD = 65;
     for (let j = 0; j < m.h; j++) {
         for (let i = 0; i < m.w; i++) {
@@ -1008,9 +1015,6 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
-// Straight dashed line from the rover to the pending goal, with a marching-ants
-// animation and an arrowhead at the destination. Shown only between "goal sent"
-// and the moment Nav2's real /plan arrives.
 function drawAnimatedInterimPath(ctx, from, to, color) {
     const p1 = w2s(from.x, from.y), p2 = w2s(to.x, to.y);
     const dashLen = 10, gapLen = 7;
@@ -1100,7 +1104,6 @@ function drawMap() {
         const finalPt = latestPlan[latestPlan.length - 1];
         drawArrow(ctx, finalPt.x, finalPt.y, finalPt.yaw, theme['--danger'], 'GOAL', 28);
     } else if (layerVis.plan && navStatus === 'Planning' && missionGoal && robot) {
-        // Goal sent, no /plan yet: show an animated straight line toward the destination.
         drawAnimatedInterimPath(ctx, robot, missionGoal);
     }
 
@@ -1269,7 +1272,7 @@ document.addEventListener('pointerdown', (evt) => {
 
 mapWrap.addEventListener('contextmenu', e => e.preventDefault());
 mapWrap.addEventListener('pointerdown', (evt) => {
-    if (evt.target.closest('#map-pose-popup')) return;
+    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
     mapWrap.setPointerCapture(evt.pointerId);
     const [sx, sy] = evtPos(evt);
     if (evt.button === 1 || evt.button === 2 || evt.shiftKey) {
@@ -1282,7 +1285,7 @@ mapWrap.addEventListener('pointerdown', (evt) => {
     needsDraw = true;
 });
 mapWrap.addEventListener('pointermove', (evt) => {
-    if (evt.target.closest('#map-pose-popup')) return;
+    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
     const [sx, sy] = evtPos(evt);
     const w = s2w(sx, sy);
     document.getElementById('map-cursor').textContent = 'x ' + w.x.toFixed(2) + '  y ' + w.y.toFixed(2) + ' m';
@@ -1297,7 +1300,7 @@ mapWrap.addEventListener('pointermove', (evt) => {
     }
 });
 const endPointer = (evt) => {
-    if (evt.target.closest('#map-pose-popup')) return;
+    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
     if (panState) { panState = null; return; }
     if (!activeGoal) return;
     const g = activeGoal; activeGoal = null;
@@ -1344,14 +1347,12 @@ function frame(ts) {
     }
     if (localCostmapDirty && latestLocalCostmap) { rebuildLocalCostmapImage(); localCostmapDirty = false; needsDraw = true; }
     if (globalCostmapDirty && latestGlobalCostmap) { rebuildGlobalCostmapImage(); globalCostmapDirty = false; needsDraw = true; }
-    // Keep redrawing while a goal is being planned so the animated straight-line path can move.
     if (navStatus === 'Planning' && missionGoal && (!latestPlan || latestPlan.length === 0)) needsDraw = true;
     if (follow || needsDraw) { drawMap(); needsDraw = false; }
     if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
     requestAnimationFrame(frame);
 }
 
-// Distance left along the plan, measured from the rover's nearest point on it.
 function calcDistanceRemaining() {
     if (!latestPlan || latestPlan.length < 2) return null;
     let start = 0, lead = 0;
@@ -1384,7 +1385,6 @@ function updateStatus() {
     document.getElementById('stat-distance').textContent =
         (distanceRemaining !== null && (navStatus === 'Navigating' || navStatus === 'Planning')) ? distanceRemaining.toFixed(2) : '—';
 
-    // Mission complete: rover is within tolerance of the final goal
     if (navStatus === 'Navigating') {
         let reached = false;
         if (robot && missionGoal) reached = Math.hypot(robot.x - missionGoal.x, robot.y - missionGoal.y) < CFG.reachTolM;
@@ -1475,7 +1475,6 @@ async function withBusy(btn, fn) {
     finally { if (btn) { btn.classList.remove('loading'); btn.disabled = false; } }
 }
 function run(btn, fn) { return withBusy(btn, fn); }
-// Navigation buttons manage their own spinner (it stays until Nav2 answers with a /plan).
 function runNavButton(btn, fn) { return fn(); }
 
 window.run = run;
@@ -1541,7 +1540,6 @@ async function sendWaypoints() {
 }
 
 async function sendAbort() {
-    // Local state first: the operator must see the abort immediately.
     clearNavLoading();
     navStatus = 'Aborted';
     missionGoal = null;
@@ -1555,7 +1553,7 @@ async function sendAbort() {
 }
 
 // =====================================================================
-//  Save map (downloads the PGM + YAML package from the rover)
+//  Save map
 // =====================================================================
 function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
@@ -1584,7 +1582,6 @@ async function saveCurrentMap() {
         notify('INFO', 'Map "' + mapName + '" saved and downloaded.');
     } catch (e) {
         if (e instanceof TypeError) {
-            // Network/CORS: let the browser handle the download directly.
             notify('WARNING', 'Direct fetch was blocked - asking the browser to download the map instead.');
             const f = document.createElement('iframe');
             f.style.display = 'none'; f.src = url;
@@ -1717,7 +1714,7 @@ async function applySystemMode() {
 }
 
 // =====================================================================
-//  Joystick  (publishes sensor_msgs/Joy on /joy, axes = [turn, forward])
+//  Joystick
 // =====================================================================
 const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
 const joy = { x: 0, y: 0, active: false, timer: null };
@@ -1742,7 +1739,7 @@ window.toggleJoyEnable = function () {
     btn.textContent = joyEnabled ? 'Disable' : 'Enable';
     btn.classList.toggle('btn-primary', joyEnabled);
     btn.classList.toggle('btn-secondary', !joyEnabled);
-    if (!joyEnabled) {                         // always leave the rover stopped
+    if (!joyEnabled) {
         joyEnd();
         publishJoyRaw(0, 0);
     }
@@ -1785,12 +1782,10 @@ window.addEventListener('blur', joyEnd);
 document.addEventListener('visibilitychange', () => { if (document.hidden) joyEnd(); });
 
 // =====================================================================
-//  MAP VIEWER  (PGM view, zoom / pan / two-click distance measurement)
-//  Shows the live map exactly as map_saver would write it (free 254,
-//  unknown 205, occupied 0), or any .pgm (+ optional .yaml) from disk.
+//  MAP VIEWER
 // =====================================================================
 const PGM_FREE = 254, PGM_UNKNOWN = 205, PGM_OCC = 0;
-const OCC_THRESH = 65, FREE_THRESH = 25;      // same defaults as nav2_map_server
+const OCC_THRESH = 65, FREE_THRESH = 25;
 
 const mv = {
     ready: false, open: false,
@@ -1850,7 +1845,6 @@ function mvEnsureInit() {
     });
 }
 
-// ----- image source -----
 function mvSetGray(gray, w, h, res, origin, label) {
     mv.gray = gray; mv.w = w; mv.h = h; mv.res = res; mv.origin = origin; mv.label = label;
     const c = document.createElement('canvas');
@@ -1883,7 +1877,7 @@ function mvLoadLive() {
             const v = m.data[j * m.w + i];
             let g = PGM_UNKNOWN;
             if (v >= 0) g = v >= OCC_THRESH ? PGM_OCC : (v <= FREE_THRESH ? PGM_FREE : PGM_UNKNOWN);
-            gray[(m.h - 1 - j) * m.w + i] = g;        // PGM row 0 is the top (highest y)
+            gray[(m.h - 1 - j) * m.w + i] = g;
         }
     }
     mvSetGray(gray, m.w, m.h, m.res, { x: m.ox, y: m.oy }, 'Live map (PGM view)');
@@ -1909,7 +1903,7 @@ function parsePGM(buf) {
     if (!(w > 0 && h > 0 && maxv > 0 && maxv < 65536)) throw new Error('invalid PGM header');
     const gray = new Uint8Array(w * h);
     if (magic === 'P5') {
-        pos++;                                          // single whitespace after maxval
+        pos++;
         const bytes = maxv < 256 ? 1 : 2;
         if (pos + w * h * bytes > u8.length) throw new Error('PGM data is truncated');
         for (let i = 0; i < w * h; i++) {
@@ -1980,7 +1974,6 @@ function mvDownloadPGM() {
     downloadBlob(new Blob([out], { type: 'image/x-portable-graymap' }), base + '.pgm');
 }
 
-// ----- view transform -----
 function mvFit() {
     if (!mv.img) return;
     const W = mv.canvas.clientWidth || 800, H = mv.canvas.clientHeight || 500;
@@ -2001,7 +1994,6 @@ function mvZoomAt(sx, sy, f) {
 function mvZoomBtn(f) { mvZoomAt((mv.canvas.clientWidth || 800) / 2, (mv.canvas.clientHeight || 500) / 2, f); }
 const mvToImg = (sx, sy) => ({ u: (sx - mv.tx) / mv.s, v: (sy - mv.ty) / mv.s });
 
-// ----- measure -----
 function mvToggleMeasure() {
     mv.measure = !mv.measure;
     $mv('mv-measure-btn').classList.toggle('on', mv.measure);
@@ -2037,7 +2029,6 @@ function mvReadout() {
     el.textContent = txt;
 }
 
-// ----- drawing -----
 function mvDraw() {
     if (!mv.ready || !mv.open) return;
     const c = mv.canvas, dpr = window.devicePixelRatio || 1;
@@ -2065,7 +2056,6 @@ function mvDraw() {
     ctx.strokeRect(mv.tx + 0.5, mv.ty + 0.5, mv.w * mv.s, mv.h * mv.s);
     ctx.restore();
 
-    // measurement overlay
     const S = (p) => [mv.tx + p.u * mv.s, mv.ty + p.v * mv.s];
     const pts = mv.pts.slice();
     let live = false;
@@ -2093,7 +2083,6 @@ function mvDraw() {
         });
     }
 
-    // scale bar
     const pxPerM = mv.s / mv.res;
     const nice = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100].find(n => n * pxPerM >= 70) || 100;
     const len = nice * pxPerM, bx = 14, by = H - 16;
@@ -2104,7 +2093,6 @@ function mvDraw() {
     ctx.fillText(nice + ' m', bx, by - 6);
 }
 
-// ----- open / close -----
 function openMapViewer() {
     mvEnsureInit();
     mv.root.hidden = false;
@@ -2112,7 +2100,6 @@ function openMapViewer() {
     mv._fitted = false;
     $mv('mv-measure-btn').classList.toggle('on', mv.measure);
     mv.canvas.style.cursor = mv.measure ? 'crosshair' : 'grab';
-    // Always show the freshest live map when opening, unless a file was loaded on purpose.
     if (!mv.gray || mv.label.indexOf('Live map') === 0) mvLoadLive();
     requestAnimationFrame(() => { if (mv.img) mvFit(); mvDraw(); });
 }
@@ -2150,7 +2137,6 @@ function tone(type, f0, f1, gain0, dur, ramp) {
 }
 function playListenSound() { tone('sine', 587.33, 880, 0.12, 0.2); }
 function playProcessingSound() {
-    // a soft little "thinking" blip, repeated while waiting on the server
     tone('triangle', 500, 640, 0.08, 0.09);
     notifyHelioState('sound_play', 'thinking', '', 'thinking_blip');
 }
@@ -2159,10 +2145,6 @@ function playErrorSound() {
     notifyHelioState('sound_play', agentState, '', 'error_buzz');
 }
 
-// ----- mic analyser only: no sounds, no per-frame writes of its own -----
-// EyeMotion reads MicLevels.data on its own schedule, so listening never
-// jitters in lock-step with every little sound - it stays calm and only
-// leans in gently on real, sustained volume.
 const MicLevels = {
     stream: null, analyser: null, data: null, active: false,
     async start() {
@@ -2174,7 +2156,7 @@ const MicLevels = {
         const src = audioCtx.createMediaStreamSource(this.stream);
         this.analyser = audioCtx.createAnalyser();
         this.analyser.fftSize = 256;
-        this.analyser.smoothingTimeConstant = 0.85;   // heavily smoothed - no jitter
+        this.analyser.smoothingTimeConstant = 0.85;
         src.connect(this.analyser);
         this.data = new Uint8Array(this.analyser.frequencyBinCount);
         this.active = true;
@@ -2192,11 +2174,6 @@ const MicLevels = {
     }
 };
 
-// ----- calm, deliberate "in control" idle behaviour -----
-// While listening and nobody is talking, Helio doesn't twitch or scan
-// nervously - it holds a gaze for a while, eases slowly to a new one, and
-// occasionally lets its eyes soften into a little smile. All motion is
-// eased with a small lerp factor so it always looks slow and composed.
 const EyeMotion = {
     raf: null,
     gazeX: 0, gazeY: 0, targetX: 0, targetY: 0,
@@ -2221,7 +2198,6 @@ const EyeMotion = {
         if (!helioOpen || agentState !== 'listening') { this.raf = null; return; }
         const now = performance.now();
         if (now > this.nextGazeAt) {
-            // A calm, deliberate new place to look - never a rapid dart.
             this.targetX = (Math.random() * 2 - 1) * 26;
             this.targetY = (Math.random() * 2 - 1) * 12;
             this.nextGazeAt = now + 3800 + Math.random() * 4200;
@@ -2231,13 +2207,11 @@ const EyeMotion = {
             setTimeout(() => { if (robotFace) robotFace.classList.remove('happy'); }, 1800 + Math.random() * 1400);
             this.nextSmileAt = now + 7000 + Math.random() * 7000;
         }
-        // Slow, easing interpolation toward the target - the "cool, in
-        // control" feel comes entirely from this small lerp factor.
         this.gazeX += (this.targetX - this.gazeX) * 0.012;
         this.gazeY += (this.targetY - this.gazeY) * 0.012;
         const level = MicLevels.level();
         if (robotFace) {
-            const scale = 1 + level * 0.14;   // a gentle lean-in, not a jump
+            const scale = 1 + level * 0.14;
             robotFace.querySelectorAll('.eye').forEach((eye) => {
                 eye.style.transform = `translate(${this.gazeX.toFixed(1)}px, ${this.gazeY.toFixed(1)}px) scaleY(${scale.toFixed(3)})`;
             });
@@ -2246,7 +2220,6 @@ const EyeMotion = {
     }
 };
 
-// ----- fake "mouth-move" pulses on the eyes while Helio talks -----
 const TalkAnimator = {
     timer: null,
     start() {
@@ -2267,7 +2240,6 @@ const TalkAnimator = {
     }
 };
 
-// ----- the occasional Emo-style blink -----
 let blinkTimer = null;
 function scheduleBlink() {
     if (blinkTimer) clearTimeout(blinkTimer);
@@ -2281,15 +2253,11 @@ function scheduleBlink() {
 
 // =====================================================================
 //  HELIO VOICE ASSISTANT
-//  Continuous transcription. A command is submitted after a short,
-//  deliberate pause in speech (never on a recognition segment boundary),
-//  and is sent to the server immediately - Helio never reads it back first.
-//  There is no on-screen transcript; Helio only reacts and speaks.
 // =====================================================================
 const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
 const BASE_SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
-const SILENCE_COMMIT_MS = 1500;        // pause after the last word before sending (was 3600)
-const LOW_CONFIDENCE_GRACE_MS = 800;   // small extra wait when recognition is unsure (was 3200)
+const SILENCE_COMMIT_MS = 1500;
+const LOW_CONFIDENCE_GRACE_MS = 800;
 const CONFIDENCE_THRESHOLD = 0.6;
 const HELIO_TIMEOUT_MS = 20000;
 
@@ -2310,12 +2278,11 @@ let confidenceSum = 0;
 let confidenceCount = 0;
 let speechActive = false;
 let helioOpen = false;
-let agentState = 'idle';               // idle | listening | thinking | speaking
+let agentState = 'idle';
 let currentCallId = null;
 let selectedLanguage = (navigator.language || '').toLowerCase().startsWith('hi') ? 'hi' : 'en';
 let wakeLanguageOverride = null;
 let thinkingTimer = null;
-let thinkingStageIndex = 0;
 let commandSeq = 0;
 let lastSpeechNetworkWarn = 0;
 window.currentUtterance = null;
@@ -2378,10 +2345,6 @@ const PeekController = {
     }
 };
 
-// While Helio is listening but you aren't talking (mic level is low), it isn't
-// frozen: it "looks around" a little and occasionally shows a stray thought,
-// just like Emo does between interactions. This never overrides the
-// mic-reactive movement in MicLevels - it only runs when the mic is quiet.
 const HelioIdleController = {
     bubbleTimer: null,
     phrases: ['I am here when you need me.', 'Checking the rover state...', 'Ready for your next command.'],
@@ -2405,11 +2368,8 @@ const HelioIdleController = {
     }
 };
 
-// ----- small UI helpers -----
-// There is deliberately no on-screen transcript any more: Helio never shows
-// what you said or what it is about to say, it just reacts and speaks.
-function setVoiceStatus() { /* no-op: transcript UI removed */ }
-function renderTranscript() { /* no-op: transcript UI removed */ }
+function setVoiceStatus() {}
+function renderTranscript() {}
 
 function setFace(state) {
     if (robotFace) robotFace.className = 'robot-face ' + state;
@@ -2419,9 +2379,7 @@ function setFace(state) {
     if (state === 'speaking') TalkAnimator.start(); else TalkAnimator.stop();
 }
 
-// who: 'user' | 'helio' - kept as a no-op hook (no transcript is shown),
-// so any legacy call sites stay harmless.
-function setTeleprompter() { /* no-op: transcript UI removed */ }
+function setTeleprompter() {}
 
 function appendHistory(sender, text) {
     if (!historyListEl || !text) return;
@@ -2448,9 +2406,6 @@ function clearVoiceTimers() {
     silenceCommitTimer = null; lowConfidenceTimer = null; recognitionRestartTimer = null;
 }
 
-// The "thinking" indicator is just the dots inside the black screen (toggled
-// by setFace('thinking')) plus a soft repeating blip so it also *sounds* like
-// it's working on your request.
 function startThinkingIndicator() {
     stopThinkingIndicator();
     notifyHelioState('thinking_start', 'thinking', '', '');
@@ -2463,7 +2418,6 @@ function stopThinkingIndicator() {
     notifyHelioState('thinking_stop', 'idle', '', '');
 }
 
-// ----- recognition -----
 function recognitionStart() {
     if (!recognition || !helioOpen || agentState !== 'listening') return;
     try { recognition.start(); }
@@ -2482,8 +2436,6 @@ function pendingText() {
     return [transcriptText.trim(), interimText.trim()].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 
-// Called on every recognition result. Restarts the silence countdown, so a
-// command is only sent once the speaker has really stopped for SILENCE_COMMIT_MS.
 function scheduleSilenceCommit() {
     if (silenceCommitTimer) clearTimeout(silenceCommitTimer);
     if (lowConfidenceTimer) { clearTimeout(lowConfidenceTimer); lowConfidenceTimer = null; }
@@ -2507,7 +2459,7 @@ function commitTranscript() {
     const text = pendingText();
     if (!text || agentState !== 'listening') return;
     clearVoiceTimers();
-    recognitionStop();                      // mic off while Helio talks, so it never hears itself
+    recognitionStop();
     interimText = ''; transcriptText = '';
     confidenceSum = 0; confidenceCount = 0;
     
@@ -2577,7 +2529,7 @@ function bindRecognition() {
             recognitionRestartDelay = 2500;
             if (Date.now() - lastSpeechNetworkWarn > 15000) {
                 lastSpeechNetworkWarn = Date.now();
-                notify('ERROR', 'Speech recognition needs an internet connection (Chrome sends audio to Google).');
+                notify('ERROR', 'Speech recognition needs an internet connection.');
             }
         }
         setVoiceStatus('LISTENING CONTINUOUSLY', true);
@@ -2586,8 +2538,6 @@ function bindRecognition() {
     recognition.onend = () => {
         speechActive = false;
         if (!helioOpen || agentState !== 'listening') return;
-        // Browsers end recognition on their own now and then. That is NOT the end of
-        // a command: restart quietly and keep the words collected so far.
         scheduleRecognitionRestart();
     };
 }
@@ -2603,10 +2553,6 @@ function resumeListening() {
     recognitionStart();
 }
 
-// ----- open / close -----
-// Both the "Ask Helio" button and the wake word land here: pop open
-// instantly and say "What?" - slow and clear - before dropping into
-// listening. No startup chime, just the voice.
 function openVoiceModal() {
     if (!SpeechRecognitionImpl) {
         alert('Continuous speech recognition is not supported in this browser. Use Chrome or Edge.');
@@ -2646,7 +2592,7 @@ function closeVoiceModal() {
     speechActive = false;
     notifyHelioState('helio_off', 'idle', '', '');
     
-    commandSeq += 1;                        // invalidate any command still in flight
+    commandSeq += 1;
     clearVoiceTimers();
     recognitionStop();
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
@@ -2661,7 +2607,6 @@ function closeVoiceModal() {
     syncWake();
 }
 
-// ----- speech output -----
 function cleanForSpeech(t) {
     return String(t || '')
         .replace(/```[\s\S]*?```/g, ' ')
@@ -2671,7 +2616,6 @@ function cleanForSpeech(t) {
         .trim();
 }
 
-// Picks a natural-sounding installed voice once and reuses it.
 let cachedVoice = null, cachedVoiceLang = null;
 function pickVoice(lang) {
     if (!('speechSynthesis' in window)) return null;
@@ -2681,15 +2625,11 @@ function pickVoice(lang) {
     const base = lang.slice(0, 2);
     const wanted = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith(base));
     const pool = wanted.length ? wanted : voices;
-    // Prefer voices that tend to sound more natural/expressive over plain robotic defaults.
     const preferred = pool.find((v) => /natural|enhanced|premium|neural/i.test(v.name)) || pool[0];
     cachedVoice = preferred; cachedVoiceLang = lang;
     return preferred;
 }
 
-// Speaks `text` and resolves when finished (or cancelled). Splits into
-// sentence-ish chunks and gives each a slightly different pitch/rate so it
-// reads with the rise-and-fall of an actual person talking, not a flat monotone.
 function speakText(text, opts) {
     opts = opts || {};
     const spoken = cleanForSpeech(text);
@@ -2730,23 +2670,16 @@ function speakText(text, opts) {
         u.volume = opts.volume != null ? opts.volume : 1;
         u.onend = finish;
         u.onerror = finish;
-        wd = setTimeout(finish, 2500 + chunk.length * 110);   // some engines never fire onend
+        wd = setTimeout(finish, 2500 + chunk.length * 110);
         window.currentUtterance = u;
         window.speechSynthesis.speak(u);
     })), Promise.resolve());
 }
 
-function stopTalking() {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-}
-
-// ----- one full command turn: send right away -> react -> speak the reply -----
 async function handleCommand(text) {
     const seq = ++commandSeq;
     const alive = () => helioOpen && seq === commandSeq;
 
-    // The command goes to the server immediately - Helio never repeats what
-    // you said back to you before sending.
     agentState = 'thinking';
     setVoiceStatus();
     setFace('thinking');
@@ -2780,20 +2713,11 @@ window.closeHistory = function () {
 
 // =====================================================================
 //  HELIO BRAIN
-//  Helio runs as a persistent WebSocket agent at /ws/helio. The server owns
-//  the conversation ID and sends a final response for each user message.
 // =====================================================================
 let helioBackendDownUntil = 0;
 let helioSocket = null;
 let helioSocketConnectPromise = null;
 let helioPendingRequest = null;
-
-function pickReply(data) {
-    if (!data) return '';
-    if (typeof data === 'string') return data;
-    const v = data.response || data.reply || data.message || data.text || data.answer || data.output;
-    return typeof v === 'string' ? v : '';
-}
 
 function closeHelioSocket(reason) {
     const socket = helioSocket;
@@ -2891,9 +2815,6 @@ async function queryHelio(text) {
     }
 }
 
-// When the Helio server is unreachable, on-device commands (drive, save map,
-// etc.) still work through localAssistant. But if it isn't even a command it
-// recognizes, that's not "I don't understand" - the server it needed is down.
 const UNRECOGNIZED_LOCAL_REPLY = "Sorry, I didn't understand that command. Try: go to x 2 y 3, follow waypoints, abort, save map, or status.";
 async function localFallback(text) {
     const reply = await localAssistant(text);
@@ -2991,11 +2912,11 @@ async function localAssistant(raw) {
     if (has(/\b(help|what can you do)\b/)) {
         return { text: 'You can say: go to x 2 y 3, follow waypoints, abort, save map, view map, enable joystick, or status.' };
     }
-    return { text: "Sorry, I didn't understand that command. Try: go to x 2 y 3, follow waypoints, abort, save map, or status." };
+    return { text: UNRECOGNIZED_LOCAL_REPLY };
 }
 
 // =====================================================================
-//  Wake word  (dashboard-level: say the word and Helio opens by itself)
+//  Wake word
 // =====================================================================
 const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
 let wakeWord = 'robot';
@@ -3104,7 +3025,7 @@ function bindWake() {
     wakeRec.onerror = (e) => {
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
             wakeBlocked = true;
-            notify('WARNING', 'Microphone access is blocked, so the wake word is off. Helio still works from the Ask Helio button.');
+            notify('WARNING', 'Microphone access is blocked, so the wake word is off.');
             updateWakeBtn();
         } else if (e.error === 'network') {
             wakeRestartDelay = 5000;
@@ -3114,7 +3035,6 @@ function bindWake() {
         wakeRestartDelay = 300;
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
             const heard = ev.results[i][0].transcript || '';
-            // Trigger phrase is "hey robot" / "hey jojo", not the bare name alone.
             const re = new RegExp('\\bhey\\s+' + wakeWord + '\\b', 'i');
             if (re.test(heard)) {
                 wakeLanguageOverride = wakeWord === 'jojo' ? 'hi' : 'en';
