@@ -157,7 +157,7 @@ body {
 .brand-container {
     display: flex; flex-direction: row; align-items: center; gap: 0.6rem; padding: 0.15rem 0.35rem;
 }
-.sidebar-toggle-btn{width:26px;height:30px;flex:none;padding:0;border:0;background:transparent;color:var(--muted);font-size:1.15rem;line-height:1;cursor:pointer}
+.sidebar-toggle-btn{width:26px;height:30px;flex:none;padding:0;margin-left:4px;border:0;background:transparent;color:var(--muted);font-size:1.15rem;line-height:1;cursor:pointer}
 .sidebar-toggle-btn:hover{color:var(--primary)}
 .brand-logo { width: 38px; height: 38px; border-radius: 9px; flex: none; box-shadow: none; }
 .brand-logo svg { width: 100%; height: 100%; display: block; }
@@ -581,7 +581,7 @@ body:has(.voice-modal.active) .helio-fab-wrap{display:none}
 .sidebar-collapsed .main-wrapper{min-width:0}
 .sidebar-collapsed .header-title{padding-left:44px}
 .sidebar-collapsed .header-brand{display:inline-block}
-.sidebar-collapsed .sidebar-toggle-btn{position:absolute;left:0;top:14px;width:34px;height:34px;background:var(--panel);border:1px solid var(--border);border-left:0;border-radius:0 7px 7px 0;box-shadow:0 4px 12px rgba(0,0,0,.12);color:var(--primary)}
+.sidebar-collapsed .sidebar-toggle-btn{position:absolute;left:6px;top:14px;width:34px;height:34px;background:var(--panel);border:1px solid var(--border);border-radius:7px;box-shadow:0 4px 12px rgba(0,0,0,.12);color:var(--primary)}
 .header-actions > .icon-btn[title="Back to login"]{color:var(--danger);border-color:rgba(227,0,53,.35)}
 .header-actions > .icon-btn[title="Back to login"]{min-width:48px;height:42px;padding:0 10px;background:var(--danger);color:#fff;border-color:var(--danger);font-weight:800}
 .header-actions > .icon-btn[title="Back to login"]:hover{background:#9f0026;border-color:#9f0026;color:#fff}

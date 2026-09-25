@@ -6,21 +6,46 @@
 //    - WebRTC     (RealSense RGB + Depth, camera_webrtc_streamer.py)
 //    - Helio      (continuous voice assistant, wake word, local command engine)
 //
-//  Endpoints default to the host the page was loaded from, and can be
-//  overridden with URL parameters, e.g.
-//    index.html?rover=192.168.1.50
-//    index.html?api=http://host:8000&ros=ws://host:9090&webrtc=http://host:8081
+//  All service endpoints use the authenticated rover host. The dashboard
+//  never falls back to the browser hostname or URL endpoint overrides.
 // =====================================================================
 
 // =====================================================================
 //  CONFIGURATION
 // =====================================================================
-const _qs = new URLSearchParams(window.location.search);
-const ROVER_IP = _qs.get('rover') || window.ROVER_IP || window.location.hostname || '127.0.0.1';
-const REST_API_BASE = (_qs.get('api') || window.REST_API_BASE || `http://${ROVER_IP}:8000`).replace(/\/+$/, '');
-const ROSBRIDGE_WS_URL = _qs.get('ros') || window.ROSBRIDGE_WS_URL || `ws://${ROVER_IP}:9090`;
-const WEBRTC_SIGNAL_URL = (_qs.get('webrtc') || window.WEBRTC_SIGNAL_URL || `http://${ROVER_IP}:8081`).replace(/\/+$/, '');
-const HELIO_WS_URL = _qs.get('helio') || window.HELIO_WS_URL || `ws://${ROVER_IP}:8001/ws/helio`;
+const SESSION_HOST_KEY = 'Rover host';
+const SESSION_EXPIRY_KEY = 'Rover host expires';
+
+function isValidRoverHost(value) {
+    const host = String(value || '').trim();
+    if (host === 'localhost') return true;
+    const parts = host.split('.');
+    return parts.length === 4 && parts.every((part) =>
+        /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255
+    );
+}
+
+function readAuthenticatedRoverHost() {
+    const configuredHost = String(window.ROVER_IP || window.ROVER_HOST || '').trim();
+    if (isValidRoverHost(configuredHost)) return configuredHost;
+    try {
+        const storedHost = String(localStorage.getItem(SESSION_HOST_KEY) || '').trim();
+        const expiry = Number(localStorage.getItem(SESSION_EXPIRY_KEY) || 0);
+        if (isValidRoverHost(storedHost) && Date.now() < expiry) return storedHost;
+    } catch (_) {}
+    return '';
+}
+
+const ROVER_IP = readAuthenticatedRoverHost();
+if (!ROVER_IP) {
+    window.location.replace('index.html');
+    throw new Error('Rover session is missing or expired. Redirecting to login.');
+}
+
+const REST_API_BASE = `http://${ROVER_IP}:8000`;
+const ROSBRIDGE_WS_URL = `ws://${ROVER_IP}:9090`;
+const WEBRTC_SIGNAL_URL = `http://${ROVER_IP}:8081`;
+const HELIO_WS_URL = `ws://${ROVER_IP}:8001/ws/helio`;
 
 const CFG = {
     chartWindowSec: 30,
@@ -101,6 +126,33 @@ function toggleTheme() {
     applyTheme(isLight);
     try { localStorage.setItem('milusions-theme', isLight ? 'light' : 'dark'); } catch (e) {}
 }
+
+function updateDocumentFullscreenButton() {
+    const button = document.getElementById('document-fullscreen-btn');
+    if (!button) return;
+    const active = Boolean(document.fullscreenElement);
+    button.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
+    button.setAttribute('aria-label', button.title);
+    button.querySelector('span').textContent = '⛶';
+}
+
+async function toggleDocumentFullscreen() {
+    try {
+        if (document.fullscreenElement) {
+            await document.exitFullscreen();
+        } else if (document.documentElement.requestFullscreen) {
+            await document.documentElement.requestFullscreen();
+        } else {
+            notify('WARNING', 'Fullscreen is not supported by this browser.');
+        }
+    } catch (error) {
+        notify('ERROR', 'Could not change fullscreen mode.');
+    }
+    updateDocumentFullscreenButton();
+}
+
+document.addEventListener('fullscreenchange', updateDocumentFullscreenButton);
+window.toggleDocumentFullscreen = toggleDocumentFullscreen;
 
 // =====================================================================
 //  State
