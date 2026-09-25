@@ -29,21 +29,6 @@
         <div class="modal-assistant-title">Helio</div>
 
         <div class="helio-top-right">
-            <div class="helio-tool-wrap">
-                <button id="prompt-toggle-btn" class="icon-btn" type="button" onclick="togglePrompt(event)"
-                    title="Type a command" aria-expanded="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path
-                            d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-9 11H9v-2h2v2zm0-3H9V7h2v5zm3 3h-2v-2h2v2zm0-3h-2V7h2v5zm3 3h-2v-2h2v2zm0-3h-2V7h2v5z" />
-                    </svg>
-                </button>
-                <div id="prompt-drawer" class="prompt-drawer" role="dialog" aria-label="Type a command">
-                    <input id="user-input" type="text" placeholder="Type a command..." autocomplete="off">
-                    <button id="manual-send-btn" class="manual-send-btn" type="button"
-                        onclick="sendManualText()">SEND</button>
-                </div>
-            </div>
-
             <button class="icon-btn" type="button" onclick="toggleHistory()" title="Session History">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path
@@ -55,20 +40,16 @@
         </div>
 
         <div class="modal-main-column">
-            <div id="robot-face" class="robot-face listening" aria-label="Helio listening">
-                <div class="eye"></div>
-                <div class="eye"></div>
+            <div id="robot-screen" class="robot-screen">
+                <div id="robot-face" class="robot-face listening" aria-label="Helio listening">
+                    <div class="eye"></div>
+                    <div class="eye"></div>
+                </div>
+                <div id="helio-dots" class="helio-dots" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
             </div>
             <div id="helio-idle-bubble" class="helio-idle-bubble" aria-live="polite"></div>
-            <div class="voice-transcript" aria-live="polite">
-                <div id="helio-live-line" class="helio-live-line" aria-live="polite"></div>
-                <button id="helio-mic" class="helio-mic listening" type="button" aria-label="Helio microphone">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/>
-                        <path d="M19 11a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.92V21H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-3.08A7 7 0 0 0 19 11Z"/>
-                    </svg>
-                </button>
-            </div>
         </div>
 
         <div id="modal-history-column" class="modal-history-column">

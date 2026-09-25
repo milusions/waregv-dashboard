@@ -537,27 +537,32 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .prompt-drawer.show{opacity:1;visibility:visible;pointer-events:auto;transform:translateY(0)}
 .prompt-drawer input{min-width:0;flex:1;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,.11);border-radius:7px;outline:0;background:rgba(255,255,255,.055);color:#fff;font-size:.8rem}.prompt-drawer input:focus{border-color:var(--primary)}
 .manual-send-btn{height:36px;padding:0 12px;border:0;border-radius:7px;background:var(--primary);color:#fff;font-size:.72rem;font-weight:800;cursor:pointer}.manual-send-btn:hover{filter:brightness(1.08)}
-.modal-main-column{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;padding:90px 24px 150px}
-.robot-face{display:flex;align-items:center;justify-content:center;gap:clamp(44px,6vw,82px);width:min(760px,90vw);height:min(380px,48vh);background:transparent;border:0;box-shadow:none}
-.robot-face{display:flex;align-items:center;justify-content:center;gap:clamp(44px,6vw,82px);width:min(760px,90vw);height:min(380px,48vh);background:transparent;border:0;box-shadow:none}
-.robot-face .eye{position:relative;width:clamp(138px,15vw,238px);height:clamp(225px,37.5vh,450px);border-radius:999px;background:#087cff;box-shadow:0 0 28px rgba(0,119,255,.23);transition:transform .35s ease,height .25s ease,background .25s ease}
+.modal-main-column{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;padding:70px 24px 120px}
+
+/* ---- EMO-style screen: one big black square holding the eyes (~50% of viewport) ---- */
+.robot-screen{position:relative;display:flex;align-items:center;justify-content:center;width:min(50vw,72vh,860px);height:min(43vw,62vh,720px);aspect-ratio:auto;background:#000;border:12px solid #1b1f28;border-radius:64px;box-shadow:inset 0 0 60px rgba(0,0,0,.85),inset 0 0 2px rgba(255,255,255,.05),0 22px 60px rgba(0,0,0,.55),0 0 90px rgba(0,119,255,.10);overflow:hidden}
+.robot-screen::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,0) 30%);pointer-events:none}
+.robot-face{position:relative;display:flex;align-items:center;justify-content:center;gap:clamp(30px,6vw,70px);width:100%;height:100%;background:transparent;border:0;box-shadow:none;z-index:2}
+.robot-face .eye{position:relative;width:clamp(90px,10vw,168px);height:clamp(130px,15vh,240px);border-radius:38px;background:#0d84ff;box-shadow:0 0 34px rgba(13,132,255,.55),0 0 70px rgba(13,132,255,.25);transition:transform .28s ease-out,height .3s ease,width .3s ease,border-radius .3s ease,background .25s ease}
+.robot-face.waking .eye{animation:helioWake .5s ease-out 1}
 .robot-face.listening .eye{animation:helioBreath 2.6s ease-in-out infinite}
-.robot-face.speaking .eye{animation:helioSpeak 1.05s ease-in-out infinite;background:#087cff}
-.robot-face.thinking .eye{animation:helioThink 1.2s ease-in-out infinite;background:#087cff}
-.robot-face.happy .eye{height:clamp(100px,17.5vh,200px);border-radius:999px 999px 38% 38%}
-.helio-mic{display:flex;align-items:center;justify-content:center;width:58px;height:58px;padding:0;border:0;border-radius:50%;background:#009d5b;color:#fff;cursor:default;box-shadow:0 0 0 0 rgba(0,157,91,.55);transition:background .25s ease,box-shadow .25s ease}
-.helio-mic svg{width:24px;height:24px;fill:currentColor}
-.helio-mic.listening{background:#009d5b;animation:helioMicListen 1.7s ease-in-out infinite}
-.helio-mic.speaking,.helio-mic.thinking{background:#0077ff;box-shadow:0 0 0 18px rgba(0,119,255,.13),0 0 38px rgba(0,119,255,.42);animation:helioMicSpeak 1.15s ease-in-out infinite}
-@keyframes helioMicListen{0%,100%{box-shadow:0 0 0 5px rgba(0,157,91,.14),0 0 22px rgba(0,157,91,.28)}50%{box-shadow:0 0 0 22px rgba(0,157,91,.06),0 0 42px rgba(0,157,91,.52)}}
-@keyframes helioMicSpeak{0%,100%{box-shadow:0 0 0 12px rgba(0,119,255,.1),0 0 28px rgba(0,119,255,.34)}50%{box-shadow:0 0 0 20px rgba(0,119,255,.05),0 0 46px rgba(0,119,255,.55)}}
-@keyframes helioBreath{0%,100%{transform:scaleY(.98)}50%{transform:scaleY(1.015)}}@keyframes helioSpeak{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.88)}}@keyframes helioThink{0%,100%{transform:scaleY(.92)}50%{transform:scaleY(1.02)}}
-.teleprompter{width:min(760px,88vw);min-height:30px;margin-top:18px;color:#fff;text-align:center;font-size:1.05rem;line-height:1.5;font-weight:500;text-shadow:0 2px 12px rgba(0,0,0,.45)}
-.teleprompter.user-speaking{color:#c6d0dd}.teleprompter.helio-speaking{color:#fff;font-size:1.35rem;font-weight:650}
-.thinking-panel{display:none;align-items:center;gap:8px;margin-top:10px;color:#9eabba;font-size:.76rem}.thinking-panel.active{display:flex}.thinking-spinner{width:9px;height:9px;border-radius:50%;border:2px solid rgba(255,255,255,.22);border-top-color:var(--primary);animation:helioSpin .75s linear infinite}@keyframes helioSpin{to{transform:rotate(360deg)}}
-.voice-transcript{position:absolute;inset:0;display:block;text-align:center;z-index:25;pointer-events:none}
-.helio-live-line{position:absolute;left:50%;bottom:27vh;transform:translateX(-50%);width:min(760px,88vw);min-height:24px;color:#9aa4b2;font-size:1.35rem;line-height:1.4;font-weight:500;font-style:italic;text-align:center;text-shadow:0 2px 12px rgba(0,0,0,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.voice-transcript .helio-mic{position:absolute;left:50%;bottom:54px;transform:translateX(-50%)}
+.robot-face.thinking .eye{animation:helioThink 1s ease-in-out infinite;background:#0d84ff;height:clamp(60px,10vh,96px);border-radius:26px}
+.robot-face.speaking .eye{animation:helioSpeak .5s ease-in-out infinite;background:#25a1ff}
+.robot-face.happy .eye{height:clamp(58px,10vh,96px);border-radius:26px 26px 46px 46px}
+.robot-face.blink .eye{animation:helioBlink .22s ease-in-out 1}
+@keyframes helioWake{0%{transform:scaleY(.15)}55%{transform:scaleY(1.12)}100%{transform:scaleY(1)}}
+@keyframes helioBlink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.08)}}
+@keyframes helioBreath{0%,100%{transform:scaleY(.98)}50%{transform:scaleY(1.015)}}
+@keyframes helioSpeak{0%,100%{transform:scaleY(1) scaleX(1)}50%{transform:scaleY(.62) scaleX(1.08)}}
+@keyframes helioThink{0%,50%,100%{transform:translateY(0)}25%{transform:translateY(-10px)}75%{transform:translateY(10px)}}
+
+/* consecutive "sending to server" dots, inside the black screen */
+.helio-dots{position:absolute;left:50%;bottom:15%;transform:translateX(-50%);display:flex;gap:10px;opacity:0;pointer-events:none;transition:opacity .2s ease;z-index:3}
+.helio-dots.show{opacity:1}
+.helio-dots span{width:12px;height:12px;border-radius:50%;background:#0d84ff;box-shadow:0 0 10px rgba(13,132,255,.7);animation:blinkdot 1s infinite}
+.helio-dots span:nth-child(2){animation-delay:.15s}
+.helio-dots span:nth-child(3){animation-delay:.3s}
+
 .helio-idle-bubble{position:absolute;top:86px;right:11%;max-width:250px;padding:9px 13px;border:1px solid rgba(0,119,255,.7);border-radius:5px 14px 14px 14px;background:rgba(20,22,26,.9);color:#fff;font-size:.78rem;opacity:0;transform:translateY(-5px) scale(.96);transition:opacity .25s ease,transform .25s ease;pointer-events:none}
 .helio-idle-bubble.show{opacity:1;transform:translateY(0) scale(1)}
 .helio-fab-wrap{position:absolute;left:calc(50% - 313px);top:50%;transform:translate(-50%,-50%);z-index:20;display:flex;align-items:center;justify-content:center;animation:none;margin:0}
@@ -596,8 +601,8 @@ body:has(.voice-modal.active) .helio-fab-wrap{display:none}
 @media (max-width:1280px) and (min-width:1025px){.helio-fab-wrap{left:calc(50% - 154px)}}
 @media (max-width:1050px){.helio-top-right{right:14px}}
 @media (max-width:1024px){.helio-fab-wrap{left:50%}}
-@media (max-width:820px){.sidebar{display:none}:root{--sidebar-w:0px}.robot-face .eye{width:90px;height:210px}.voice-transcript{width:calc(100vw - 28px);bottom:86px}}
-@media (max-width:640px){.header-bar{height:58px;padding:0 10px}.header-title h2{font-size:.86rem}.helio-top-right{top:14px;right:10px;gap:6px}.helio-top-right .icon-btn{width:38px;height:38px}.modal-assistant-title{top:22px;font-size:1.7rem}.modal-main-column{padding:70px 12px 120px}.robot-face{gap:26px;height:300px}.robot-face .eye{width:98px;height:238px}.prompt-drawer{width:min(320px,calc(100vw - 20px))}.helio-live-line{bottom:23vh;font-size:1.15rem}.voice-transcript .helio-mic{bottom:54px}.helio-fab{height:42px;padding:0 15px}.helio-fab svg{width:19px;height:19px}.helio-fab span{font-size:.78rem}}
+@media (max-width:820px){.sidebar{display:none}:root{--sidebar-w:0px}.robot-screen{width:min(80vw,80vh)}}
+@media (max-width:640px){.header-bar{height:58px;padding:0 10px}.header-title h2{font-size:.86rem}.helio-top-right{top:14px;right:10px;gap:6px}.helio-top-right .icon-btn{width:38px;height:38px}.modal-assistant-title{top:22px;font-size:1.7rem}.modal-main-column{padding:70px 12px 120px}.robot-screen{width:min(80vw,80vh);height:min(68vw,68vh);aspect-ratio:auto;border-radius:44px;border-width:7px}.helio-fab{height:42px;padding:0 15px}.helio-fab svg{width:19px;height:19px}.helio-fab span{font-size:.78rem}}
 
 /* ----- Rover IP dialog & inline connection form ----- */
 .rover-ip-dialog {

@@ -116,6 +116,22 @@ function dismissNotice(el) {
 }
 
 // =====================================================================
+//  Helio State Synchronization to Backend
+// =====================================================================
+async function notifyHelioState(event, state, text = '', sound_name = '') {
+    console.log(`[Helio State] Event: ${event}, State: ${state}`, { text, sound_name });
+    try {
+        await fetch(REST_API_BASE + '/helio/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ event, state, text, sound_name })
+        });
+    } catch (e) {
+        console.error('[Helio State] Sync failed', e);
+    }
+}
+
+// =====================================================================
 //  Theme
 // =====================================================================
 const theme = {};
@@ -1358,7 +1374,7 @@ let planBadgeEl = null;
 
 function updateStatus() {
     const now = performance.now();
-    if (cmdVelAt && now - cmdVelAt > CFG.cmdVelStaleMs && (currentCmdVel.linear || currentCmdVel.angular)) {
+    if (cmdVelAt && now - CFG.cmdVelStaleMs > cmdVelAt && (currentCmdVel.linear || currentCmdVel.angular)) {
         currentCmdVel = { linear: 0, angular: 0 }; needsDraw = true;
     }
 
@@ -2132,16 +2148,143 @@ function tone(type, f0, f1, gain0, dur, ramp) {
         osc.start(now); osc.stop(now + dur);
     } catch (e) {}
 }
-function playStartupSound() { tone('sine', 440, 880, 0.45, 0.35, 'exponentialRampToValueAtTime'); }
 function playListenSound() { tone('sine', 587.33, 880, 0.12, 0.2); }
-function playProcessingSound() { tone('triangle', 320, 160, 0.1, 0.12); }
+function playProcessingSound() {
+    // a soft little "thinking" blip, repeated while waiting on the server
+    tone('triangle', 500, 640, 0.08, 0.09);
+    notifyHelioState('sound_play', 'thinking', '', 'thinking_blip');
+}
+function playErrorSound() {
+    tone('sawtooth', 300, 140, 0.22, 0.4, 'exponentialRampToValueAtTime');
+    notifyHelioState('sound_play', agentState, '', 'error_buzz');
+}
+
+// ----- mic analyser only: no sounds, no per-frame writes of its own -----
+// EyeMotion reads MicLevels.data on its own schedule, so listening never
+// jitters in lock-step with every little sound - it stays calm and only
+// leans in gently on real, sustained volume.
+const MicLevels = {
+    stream: null, analyser: null, data: null, active: false,
+    async start() {
+        if (this.active) return;
+        try {
+            initAudio();
+            this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (_) { return; }
+        const src = audioCtx.createMediaStreamSource(this.stream);
+        this.analyser = audioCtx.createAnalyser();
+        this.analyser.fftSize = 256;
+        this.analyser.smoothingTimeConstant = 0.85;   // heavily smoothed - no jitter
+        src.connect(this.analyser);
+        this.data = new Uint8Array(this.analyser.frequencyBinCount);
+        this.active = true;
+    },
+    level() {
+        if (!this.active || !this.analyser) return 0;
+        this.analyser.getByteFrequencyData(this.data);
+        let sum = 0;
+        for (let i = 0; i < this.data.length; i++) sum += this.data[i];
+        return Math.min(1, (sum / this.data.length) / 85);
+    },
+    stop() {
+        this.active = false;
+        if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
+    }
+};
+
+// ----- calm, deliberate "in control" idle behaviour -----
+// While listening and nobody is talking, Helio doesn't twitch or scan
+// nervously - it holds a gaze for a while, eases slowly to a new one, and
+// occasionally lets its eyes soften into a little smile. All motion is
+// eased with a small lerp factor so it always looks slow and composed.
+const EyeMotion = {
+    raf: null,
+    gazeX: 0, gazeY: 0, targetX: 0, targetY: 0,
+    nextGazeAt: 0, nextSmileAt: 0,
+    start() {
+        this.stop();
+        const now = performance.now();
+        this.gazeX = this.gazeY = this.targetX = this.targetY = 0;
+        this.nextGazeAt = now + 1800;
+        this.nextSmileAt = now + 5000 + Math.random() * 4000;
+        this.loop();
+    },
+    stop() {
+        if (this.raf) cancelAnimationFrame(this.raf);
+        this.raf = null;
+        if (robotFace) {
+            robotFace.querySelectorAll('.eye').forEach((e) => { e.style.transform = ''; });
+            robotFace.classList.remove('happy');
+        }
+    },
+    loop() {
+        if (!helioOpen || agentState !== 'listening') { this.raf = null; return; }
+        const now = performance.now();
+        if (now > this.nextGazeAt) {
+            // A calm, deliberate new place to look - never a rapid dart.
+            this.targetX = (Math.random() * 2 - 1) * 26;
+            this.targetY = (Math.random() * 2 - 1) * 12;
+            this.nextGazeAt = now + 3800 + Math.random() * 4200;
+        }
+        if (now > this.nextSmileAt && robotFace) {
+            robotFace.classList.add('happy');
+            setTimeout(() => { if (robotFace) robotFace.classList.remove('happy'); }, 1800 + Math.random() * 1400);
+            this.nextSmileAt = now + 7000 + Math.random() * 7000;
+        }
+        // Slow, easing interpolation toward the target - the "cool, in
+        // control" feel comes entirely from this small lerp factor.
+        this.gazeX += (this.targetX - this.gazeX) * 0.012;
+        this.gazeY += (this.targetY - this.gazeY) * 0.012;
+        const level = MicLevels.level();
+        if (robotFace) {
+            const scale = 1 + level * 0.14;   // a gentle lean-in, not a jump
+            robotFace.querySelectorAll('.eye').forEach((eye) => {
+                eye.style.transform = `translate(${this.gazeX.toFixed(1)}px, ${this.gazeY.toFixed(1)}px) scaleY(${scale.toFixed(3)})`;
+            });
+        }
+        this.raf = requestAnimationFrame(() => this.loop());
+    }
+};
+
+// ----- fake "mouth-move" pulses on the eyes while Helio talks -----
+const TalkAnimator = {
+    timer: null,
+    start() {
+        this.stop();
+        this.timer = setInterval(() => {
+            if (!robotFace || agentState !== 'speaking') return;
+            robotFace.querySelectorAll('.eye').forEach((eye, i) => {
+                const s = 0.6 + Math.random() * 0.5;
+                const lift = (Math.random() * 2 - 1) * 3;
+                eye.style.transform = `scaleY(${s.toFixed(2)}) translateY(${lift.toFixed(1)}px)`;
+            });
+        }, 170);
+    },
+    stop() {
+        if (this.timer) clearInterval(this.timer);
+        this.timer = null;
+        if (robotFace) robotFace.querySelectorAll('.eye').forEach((e) => { e.style.transform = ''; });
+    }
+};
+
+// ----- the occasional Emo-style blink -----
+let blinkTimer = null;
+function scheduleBlink() {
+    if (blinkTimer) clearTimeout(blinkTimer);
+    blinkTimer = setTimeout(() => {
+        if (helioOpen && robotFace && agentState !== 'thinking') {
+            robotFace.classList.remove('blink'); void robotFace.offsetWidth; robotFace.classList.add('blink');
+        }
+        scheduleBlink();
+    }, 3200 + Math.random() * 3200);
+}
 
 // =====================================================================
 //  HELIO VOICE ASSISTANT
 //  Continuous transcription. A command is submitted after a short,
-//  deliberate pause in speech (never on a recognition segment boundary).
-//  What you said is shown in the teleprompter and read back aloud while the
-//  command is already on its way to Helio.
+//  deliberate pause in speech (never on a recognition segment boundary),
+//  and is sent to the server immediately - Helio never reads it back first.
+//  There is no on-screen transcript; Helio only reacts and speaks.
 // =====================================================================
 const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
 const BASE_SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
@@ -2152,14 +2295,9 @@ const HELIO_TIMEOUT_MS = 20000;
 
 const modal = document.getElementById('voice-modal');
 const robotFace = document.getElementById('robot-face');
-const teleprompter = document.getElementById('teleprompter');
-const captionStatus = document.getElementById('caption-status');
-const captionText = document.getElementById('caption-text');
-const helioMic = document.getElementById('helio-mic');
-const helioLiveLine = document.getElementById('helio-live-line');
+const robotScreen = document.getElementById('robot-screen');
+const helioDots = document.getElementById('helio-dots');
 const historyListEl = document.getElementById('history-list');
-const thinkingPanel = document.getElementById('thinking-panel');
-const thinkingStageText = document.getElementById('thinking-stage-text');
 
 let recognition = null;
 let recognitionRestartTimer = null;
@@ -2182,7 +2320,6 @@ let commandSeq = 0;
 let lastSpeechNetworkWarn = 0;
 window.currentUtterance = null;
 
-const THINKING_STAGES = ['Processing command', 'Working...', 'Preparing response'];
 const speechLang = () => selectedLanguage === 'hi' ? 'hi-IN' : BASE_SPEECH_LANG;
 
 function detectSpeechLanguage(text) {
@@ -2241,34 +2378,22 @@ const PeekController = {
     }
 };
 
+// While Helio is listening but you aren't talking (mic level is low), it isn't
+// frozen: it "looks around" a little and occasionally shows a stray thought,
+// just like Emo does between interactions. This never overrides the
+// mic-reactive movement in MicLevels - it only runs when the mic is quiet.
 const HelioIdleController = {
-    timer: null,
     bubbleTimer: null,
     phrases: ['I am here when you need me.', 'Checking the rover state...', 'Ready for your next command.'],
     start() {
         this.stop();
-        this.timer = setInterval(() => this.lookAround(), 1800);
         this.bubbleTimer = setInterval(() => this.thought(), 9000);
-        this.lookAround();
     },
     stop() {
-        if (this.timer) clearInterval(this.timer);
         if (this.bubbleTimer) clearInterval(this.bubbleTimer);
-        this.timer = null;
         this.bubbleTimer = null;
         const bubble = document.getElementById('helio-idle-bubble');
         if (bubble) bubble.classList.remove('show');
-    },
-    lookAround() {
-        if (!helioOpen || agentState !== 'listening' || speechActive) return;
-        const face = document.getElementById('robot-face');
-        if (!face) return;
-        face.querySelectorAll('.eye').forEach((eye) => {
-            const x = Math.round((Math.random() * 2 - 1) * 42);
-            const y = Math.round((Math.random() * 2 - 1) * 28);
-            eye.style.transform = `translate(${x}px, ${y}px)`;
-        });
-        face.classList.toggle('happy', Math.random() > 0.72);
     },
     thought() {
         if (!helioOpen || agentState !== 'listening' || speechActive) return;
@@ -2281,37 +2406,22 @@ const HelioIdleController = {
 };
 
 // ----- small UI helpers -----
-function setVoiceStatus(text, live = false) {
-    if (!captionStatus) return;
-    captionStatus.textContent = 'TRANSCRIPT';
-    captionStatus.classList.toggle('live', live);
-}
-
-function renderTranscript(empty = 'Speak whenever you are ready...') {
-    const value = [transcriptText.trim(), interimText.trim()].filter(Boolean).join(' ');
-    if (captionText) {
-        captionText.textContent = value || empty;
-        captionText.scrollTop = captionText.scrollHeight;
-    }
-    if (helioLiveLine) helioLiveLine.textContent = value || '';
-}
+// There is deliberately no on-screen transcript any more: Helio never shows
+// what you said or what it is about to say, it just reacts and speaks.
+function setVoiceStatus() { /* no-op: transcript UI removed */ }
+function renderTranscript() { /* no-op: transcript UI removed */ }
 
 function setFace(state) {
     if (robotFace) robotFace.className = 'robot-face ' + state;
-    if (helioMic) helioMic.className = 'helio-mic ' + state;
-    if (state !== 'listening') HelioIdleController.stop();
-    else if (helioOpen) HelioIdleController.start();
+    if (helioDots) helioDots.classList.toggle('show', state === 'thinking');
+    if (state === 'listening') { HelioIdleController.start(); MicLevels.start(); EyeMotion.start(); }
+    else { HelioIdleController.stop(); MicLevels.stop(); EyeMotion.stop(); }
+    if (state === 'speaking') TalkAnimator.start(); else TalkAnimator.stop();
 }
 
-// who: 'user' (grey, your words) | 'helio' (white, Helio's reply)
-function setTeleprompter(text, who) {
-    if (teleprompter) {
-        teleprompter.className = 'teleprompter ' + (who === 'helio' ? 'helio-speaking' : 'user-speaking');
-        teleprompter.textContent = text || '';
-        teleprompter.scrollTop = 0;
-    }
-    if (helioLiveLine) helioLiveLine.textContent = text || '';
-}
+// who: 'user' | 'helio' - kept as a no-op hook (no transcript is shown),
+// so any legacy call sites stay harmless.
+function setTeleprompter() { /* no-op: transcript UI removed */ }
 
 function appendHistory(sender, text) {
     if (!historyListEl || !text) return;
@@ -2338,22 +2448,19 @@ function clearVoiceTimers() {
     silenceCommitTimer = null; lowConfidenceTimer = null; recognitionRestartTimer = null;
 }
 
+// The "thinking" indicator is just the dots inside the black screen (toggled
+// by setFace('thinking')) plus a soft repeating blip so it also *sounds* like
+// it's working on your request.
 function startThinkingIndicator() {
     stopThinkingIndicator();
-    if (!thinkingPanel) return;
-    thinkingPanel.classList.add('active');
-    thinkingStageIndex = 0;
-    const update = () => {
-        if (thinkingStageText) thinkingStageText.textContent = THINKING_STAGES[Math.min(thinkingStageIndex, THINKING_STAGES.length - 1)];
-        thinkingStageIndex += 1;
-    };
-    update();
-    thinkingTimer = setInterval(update, 1200);
+    notifyHelioState('thinking_start', 'thinking', '', '');
+    playProcessingSound();
+    thinkingTimer = setInterval(() => playProcessingSound(), 900);
 }
 function stopThinkingIndicator() {
     if (thinkingTimer) clearInterval(thinkingTimer);
     thinkingTimer = null;
-    if (thinkingPanel) thinkingPanel.classList.remove('active');
+    notifyHelioState('thinking_stop', 'idle', '', '');
 }
 
 // ----- recognition -----
@@ -2403,6 +2510,10 @@ function commitTranscript() {
     recognitionStop();                      // mic off while Helio talks, so it never hears itself
     interimText = ''; transcriptText = '';
     confidenceSum = 0; confidenceCount = 0;
+    
+    notifyHelioState('listening_stop', 'thinking', '', '');
+    notifyHelioState('input_received', 'thinking', text, '');
+    
     renderTranscript();
     appendHistory('you', text);
     handleCommand(text);
@@ -2420,6 +2531,7 @@ function bindRecognition() {
         if (!helioOpen) return;
         agentState = 'listening';
         speechActive = true;
+        notifyHelioState('listening_start', 'listening', '', '');
         setVoiceStatus('LISTENING CONTINUOUSLY', true);
         setFace('listening');
     };
@@ -2442,6 +2554,8 @@ function bindRecognition() {
             }
         }
         interimText = currentInterim;
+        notifyHelioState('listening_update', 'listening', pendingText(), '');
+        
         applyDetectedLanguage([transcriptText, interimText].join(' '));
         speechActive = true;
         setVoiceStatus('LISTENING CONTINUOUSLY', true);
@@ -2490,45 +2604,59 @@ function resumeListening() {
 }
 
 // ----- open / close -----
+// Both the "Ask Helio" button and the wake word land here: pop open
+// instantly and say "What?" - slow and clear - before dropping into
+// listening. No startup chime, just the voice.
 function openVoiceModal() {
     if (!SpeechRecognitionImpl) {
         alert('Continuous speech recognition is not supported in this browser. Use Chrome or Edge.');
         return;
     }
+    activateHelio();
+}
+
+function activateHelio() {
     stopWake();
     helioOpen = true;
+    notifyHelioState('helio_on', 'waking', '', 'helio_wake');
+    
     if (modal) { modal.classList.add('active'); modal.setAttribute('aria-hidden', 'false'); }
     const hist = document.getElementById('modal-history-column'); if (hist) hist.classList.remove('show');
-    const drawer = document.getElementById('prompt-drawer'); if (drawer) drawer.classList.remove('show');
     PeekController.stop();
 
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
     clearVoiceTimers();
     commandSeq += 1;
+    const seq = commandSeq;
     currentCallId = currentCallId || String(Date.now());
     recognition.lang = speechLang();
-    renderTranscript();
-    setVoiceStatus('LISTENING CONTINUOUSLY', true);
-    setFace('listening');
-    setTeleprompter('', 'user');
-    agentState = 'listening';
 
-    recognitionStop();
-    setTimeout(() => recognitionStart(), 80);
+    agentState = 'speaking';
+    if (robotFace) robotFace.className = 'robot-face waking';
+    speakText('What?', { pitch: 1.0, rate: 0.72, volume: 1 }).then(() => {
+        if (!helioOpen || seq !== commandSeq) return;
+        resumeListening();
+        scheduleBlink();
+    });
 }
 
 function closeVoiceModal() {
     helioOpen = false;
     agentState = 'idle';
     speechActive = false;
+    notifyHelioState('helio_off', 'idle', '', '');
+    
     commandSeq += 1;                        // invalidate any command still in flight
     clearVoiceTimers();
     recognitionStop();
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopThinkingIndicator();
+    MicLevels.stop();
+    TalkAnimator.stop();
+    EyeMotion.stop();
+    if (blinkTimer) { clearTimeout(blinkTimer); blinkTimer = null; }
     if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
-    renderTranscript();
     PeekController.start();
     syncWake();
 }
@@ -2543,95 +2671,104 @@ function cleanForSpeech(t) {
         .trim();
 }
 
-// Speaks `text` and resolves when finished (or cancelled). While speaking, the
-// teleprompter scrolls along with the words so long text stays readable.
+// Picks a natural-sounding installed voice once and reuses it.
+let cachedVoice = null, cachedVoiceLang = null;
+function pickVoice(lang) {
+    if (!('speechSynthesis' in window)) return null;
+    const voices = window.speechSynthesis.getVoices() || [];
+    if (!voices.length) return null;
+    if (cachedVoice && cachedVoiceLang === lang && voices.includes(cachedVoice)) return cachedVoice;
+    const base = lang.slice(0, 2);
+    const wanted = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith(base));
+    const pool = wanted.length ? wanted : voices;
+    // Prefer voices that tend to sound more natural/expressive over plain robotic defaults.
+    const preferred = pool.find((v) => /natural|enhanced|premium|neural/i.test(v.name)) || pool[0];
+    cachedVoice = preferred; cachedVoiceLang = lang;
+    return preferred;
+}
+
+// Speaks `text` and resolves when finished (or cancelled). Splits into
+// sentence-ish chunks and gives each a slightly different pitch/rate so it
+// reads with the rise-and-fall of an actual person talking, not a flat monotone.
 function speakText(text, opts) {
     opts = opts || {};
-    return new Promise((resolve) => {
-        const spoken = cleanForSpeech(text);
-        if (!('speechSynthesis' in window) || !spoken) { resolve(); return; }
-        applyDetectedLanguage(spoken);
+    const spoken = cleanForSpeech(text);
+    if (!('speechSynthesis' in window) || !spoken) return Promise.resolve();
+    applyDetectedLanguage(spoken);
+    try { window.speechSynthesis.cancel(); } catch (_) {}
+
+    const chunks = opts.pitch != null
+        ? [spoken]
+        : spoken.split(/(?<=[.!?])\s+/).filter(Boolean);
+    if (!chunks.length) chunks.push(spoken);
+
+    const lang = speechLang();
+    const voice = pickVoice(lang);
+
+    return chunks.reduce((chain, chunk, i) => chain.then(() => new Promise((resolve) => {
+        if (!helioOpen && !opts.forceIntro) { resolve(); return; }
+        
+        notifyHelioState('speaking_start', 'speaking', chunk, '');
+        
         let finished = false, wd = null;
-        const finish = () => { if (finished) return; finished = true; clearTimeout(wd); resolve(); };
-        try { window.speechSynthesis.cancel(); } catch (_) {}
-        const u = new SpeechSynthesisUtterance(spoken);
-        u.lang = speechLang();
-        u.rate = 1.02;
+        const finish = () => { 
+            if (finished) return; 
+            finished = true; 
+            clearTimeout(wd); 
+            notifyHelioState('speaking_end', 'idle', chunk, '');
+            resolve(); 
+        };
+        
+        const u = new SpeechSynthesisUtterance(chunk);
+        u.lang = lang;
+        if (voice) u.voice = voice;
+        const isQuestion = /\?\s*$/.test(chunk);
+        const isExclaim = /!\s*$/.test(chunk);
+        u.pitch = opts.pitch != null ? opts.pitch
+            : (isExclaim ? 1.18 : isQuestion ? 1.12 : 1.0) + (Math.random() * 0.08 - 0.04);
+        u.rate = opts.rate != null ? opts.rate : 1.0 + (Math.random() * 0.08 - 0.04);
+        u.volume = opts.volume != null ? opts.volume : 1;
         u.onend = finish;
         u.onerror = finish;
-        if (opts.follow && teleprompter) {
-            const total = opts.follow.length || 1;
-            u.onboundary = (e) => {
-                const idx = Math.max(0, e.charIndex - (opts.offset || 0));
-                const max = teleprompter.scrollHeight - teleprompter.clientHeight;
-                if (max > 0) teleprompter.scrollTop = Math.min(max, (idx / total) * max);
-            };
-        }
-        wd = setTimeout(finish, 2500 + spoken.length * 110);   // some engines never fire onend
+        wd = setTimeout(finish, 2500 + chunk.length * 110);   // some engines never fire onend
         window.currentUtterance = u;
         window.speechSynthesis.speak(u);
-    });
+    })), Promise.resolve());
 }
 
 function stopTalking() {
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
 }
 
-const announcePrefix = () => selectedLanguage === 'hi' ? 'आपने कहा, ' : 'You said, ';
-
-// ----- one full command turn: read back -> Helio -> reply -----
+// ----- one full command turn: send right away -> react -> speak the reply -----
 async function handleCommand(text) {
     const seq = ++commandSeq;
     const alive = () => helioOpen && seq === commandSeq;
 
-    agentState = 'speaking';
-    setVoiceStatus('HELIO SPEAKING', false);
-    setFace('speaking');
-    setTeleprompter(text, 'user');
-    playProcessingSound();
+    // The command goes to the server immediately - Helio never repeats what
+    // you said back to you before sending.
+    agentState = 'thinking';
+    setVoiceStatus();
+    setFace('thinking');
+    startThinkingIndicator();
 
-    // The request goes out immediately; the read-back happens in parallel.
-    let done = false;
-    const replyP = queryHelio(text)
-        .catch((e) => ({ text: 'Sorry, something went wrong: ' + (e && e.message ? e.message : e) }))
-        .then((r) => { done = true; return r; });
-
-    const prefix = announcePrefix();
-    await speakText(prefix + text, { follow: text, offset: prefix.length });
-    if (!alive()) return;
-
-    if (!done) {
-        agentState = 'thinking';
-        setVoiceStatus('SENDING TO HELIO', false);
-        setFace('thinking');
-        startThinkingIndicator();
-    }
-    const reply = await replyP;
+    const reply = await queryHelio(text)
+        .catch(() => ({ text: "Uh oh! I lost my intelligence, could you ask me later?", failed: true }));
     stopThinkingIndicator();
     if (!alive()) return;
 
     const answer = (reply && reply.text) || 'Done.';
+    if (reply && reply.failed) playErrorSound();
+    
+    notifyHelioState('output_generated', 'speaking', answer, '');
     appendHistory('agent', answer);
+    
     agentState = 'speaking';
-    setVoiceStatus('HELIO SPEAKING', false);
+    setVoiceStatus();
     setFace('speaking');
-    setTeleprompter(answer, 'helio');
-    await speakText(answer, { follow: cleanForSpeech(answer) });
+    await speakText(answer);
     if (!alive()) return;
     resumeListening();
-}
-
-function sendManualText() {
-    const input = document.getElementById('user-input');
-    const text = ((input && input.value) || '').trim();
-    if (!text) return;
-    if (!helioOpen) openVoiceModal();
-    if (agentState !== 'listening') return;          // Helio is busy with another command
-    input.value = '';
-    transcriptText = text;
-    interimText = '';
-    confidenceSum = 1; confidenceCount = 1;
-    commitTranscript();
 }
 
 window.toggleHistory = function () {
@@ -2640,22 +2777,6 @@ window.toggleHistory = function () {
 window.closeHistory = function () {
     const el = document.getElementById('modal-history-column'); if (el) el.classList.remove('show');
 };
-window.togglePrompt = function (event) {
-    if (event) event.stopPropagation();
-    const drawer = document.getElementById('prompt-drawer');
-    if (!drawer) return;
-    drawer.classList.toggle('show');
-    const btn = document.getElementById('prompt-toggle-btn');
-    if (btn) btn.setAttribute('aria-expanded', drawer.classList.contains('show') ? 'true' : 'false');
-    if (drawer.classList.contains('show')) setTimeout(() => { const i = document.getElementById('user-input'); if (i) i.focus(); }, 80);
-};
-document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { const d = document.getElementById('prompt-drawer'); if (d) d.classList.remove('show'); }
-});
-(function () {
-    const input = document.getElementById('user-input');
-    if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendManualText(); } });
-})();
 
 // =====================================================================
 //  HELIO BRAIN
@@ -2746,7 +2867,7 @@ function connectHelioSocket() {
 }
 
 async function queryHelio(text) {
-    if (Date.now() < helioBackendDownUntil) return localAssistant(text);
+    if (Date.now() < helioBackendDownUntil) return localFallback(text);
     try {
         const socket = await connectHelioSocket();
         if (helioPendingRequest) throw new Error('Helio is already processing a request.');
@@ -2766,8 +2887,20 @@ async function queryHelio(text) {
     } catch (error) {
         helioBackendDownUntil = Date.now() + 60000;
         closeHelioSocket('request failed');
-        return localAssistant(text);
+        return localFallback(text);
     }
+}
+
+// When the Helio server is unreachable, on-device commands (drive, save map,
+// etc.) still work through localAssistant. But if it isn't even a command it
+// recognizes, that's not "I don't understand" - the server it needed is down.
+const UNRECOGNIZED_LOCAL_REPLY = "Sorry, I didn't understand that command. Try: go to x 2 y 3, follow waypoints, abort, save map, or status.";
+async function localFallback(text) {
+    const reply = await localAssistant(text);
+    if (reply && reply.text === UNRECOGNIZED_LOCAL_REPLY) {
+        return { text: 'Uh oh! I lost my intelligence, could you ask me later?', failed: true };
+    }
+    return reply;
 }
 
 function numbersIn(s) {
@@ -2864,8 +2997,8 @@ async function localAssistant(raw) {
 // =====================================================================
 //  Wake word  (dashboard-level: say the word and Helio opens by itself)
 // =====================================================================
-const WAKE_OPTIONS = { thor: ['thor'], jojo: ['jojo'] };
-let wakeWord = 'thor';
+const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
+let wakeWord = 'robot';
 let wakeEnabled = true;
 let wakeBlocked = false;
 let wakeRec = null, wakeRunning = false, wakeWanted = false, wakeRestartTimer = null, wakeRestartDelay = 300;
@@ -2888,7 +3021,7 @@ function renderWakeMenu() {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = key === wakeWord ? 'sel' : '';
-        button.textContent = key === 'jojo' ? 'JoJo' : 'Thor';
+        button.textContent = key === 'jojo' ? 'Hey JoJo' : 'Hey Robot';
         button.onclick = () => {
             wakeWord = key;
             wakeLanguageOverride = key === 'jojo' ? 'hi' : 'en';
@@ -2910,7 +3043,7 @@ function renderWakeMenu() {
 function updateWakeBtn() {
     const btn = document.getElementById('wake-btn');
     const label = document.getElementById('wake-label');
-    if (label) label.textContent = wakeWord === 'jojo' ? 'JoJo' : 'Thor';
+    if (label) label.textContent = wakeWord === 'jojo' ? 'Hey JoJo' : 'Hey Robot';
     const on = wakeEnabled && !wakeBlocked;
     if (btn) {
         btn.classList.toggle('on', on); btn.classList.toggle('off', !on);
@@ -2981,12 +3114,13 @@ function bindWake() {
         wakeRestartDelay = 300;
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
             const heard = ev.results[i][0].transcript || '';
-            const re = new RegExp('\\b' + wakeWord + '\\b', 'i');
+            // Trigger phrase is "hey robot" / "hey jojo", not the bare name alone.
+            const re = new RegExp('\\bhey\\s+' + wakeWord + '\\b', 'i');
             if (re.test(heard)) {
                 wakeLanguageOverride = wakeWord === 'jojo' ? 'hi' : 'en';
                 selectedLanguage = wakeLanguageOverride;
                 if (recognition) recognition.lang = speechLang();
-                openVoiceModal();
+                if (SpeechRecognitionImpl) activateHelio();
                 return;
             }
         }
