@@ -69,7 +69,6 @@
                     title="Hide navigation" aria-label="Hide navigation">&#9776;</button>
                 <div class="brand-logo">
                        <img src="logo.svg" alt="WareGV Logo" width="32" height="auto">
-
                 </div>
                 <div class="brand-title">
                     <h1>Milusions</h1>
@@ -119,7 +118,7 @@
                             <path
                                 d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z" />
                         </svg>
-                        <span id="wake-label" class="wake-label">rover</span>
+                        <span id="wake-label" class="wake-label">robot &amp; jojo</span>
                         <svg class="caret" viewBox="0 0 24 24">
                             <path d="M7 10l5 5 5-5z" />
                         </svg>
@@ -137,7 +136,7 @@
                             d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM12 1l1.5 3h-3L12 1zm0 22l-1.5-3h3L12 23zM1 12l3-1.5v3L1 12zm22 0l-3 1.5v-3L23 12zM4.2 4.2l3.2 1-2.2 2.2-1-3.2zm15.6 15.6l-3.2-1 2.2-2.2 1 3.2zM4.2 19.8l1-3.2 2.2 2.2-3.2 1zM19.8 4.2l-1 3.2-2.2-2.2 3.2-1z" />
                     </svg>
                 </button>
-                <button class="icon-btn" onclick="window.location.href='index.html'" title="Back to login" aria-label="Back to login">
+                <button class="icon-btn logout-btn" onclick="performLogout()" title="Log out and clear session" aria-label="Log out">
                     Log out
                 </button>
                 <button id="document-fullscreen-btn" class="icon-btn" type="button" onclick="toggleDocumentFullscreen()"
@@ -151,7 +150,7 @@
             <!-- SLAM Map -->
             <section class="panel p-map">
                 <div class="panel-hd">
-                    <span>SLAM Map <span class="sub" id="map-meta"></span></span>
+                    <span>SLAM Map 3D <span class="sub" id="map-meta"></span></span>
                     <div class="panel-tools">
                         <button class="tool-btn" onclick="fitMapView()" title="Fit map to panel">Fit</button>
                         <button class="tool-btn" id="follow-btn" onclick="toggleFollow()"
@@ -180,9 +179,9 @@
                                 </div>
 
                                 <div>
-                                    <div class="sec-title">Target Coordinates</div>
+                                    <div class="sec-title">Target Coordinates (Z=0 Planar)</div>
                                     <div class="coords-box">
-                                        X: <span id="lbl-x">0.00</span> | Y: <span id="lbl-y">0.00</span> | Yaw: <span
+                                        X: <span id="lbl-x">0.00</span> | Y: <span id="lbl-y">0.00</span> | Z: 0.00 | Yaw: <span
                                             id="lbl-yaw">0.00</span>&deg;
                                         <div id="waypoints-container" class="waypoints-list" style="display:none;">
                                         </div>
@@ -206,7 +205,7 @@
                                 </div>
                                 <div class="btn-row" id="waypoint-actions" style="display:none;">
                                     <button class="btn btn-success" id="follow-wp-btn"
-                                        onclick="runNavButton(this, sendWaypoints)">Follow Waypoints</button>
+                                        onclick="runNavButton(this, sendWaypoints)">Run Waypoints</button>
                                 </div>
 
                                 <hr class="divider">
@@ -217,10 +216,10 @@
 
                         <canvas id="map-canvas"></canvas>
                         <div class="map-empty" id="map-empty">Map Data Unavailable (Offline Mode)</div>
-                        <div class="map-overlay mono" id="map-cursor">x — y —</div>
+                        <div class="map-overlay mono" id="map-cursor">x — y — z 0.00</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
 
-                        <div class="map-legend" id="map-legend">
+                        <div class="map-legend" id="map-legend" onpointerdown="event.stopPropagation()" onclick="event.stopPropagation()">
                             <label><input type="checkbox" id="legend-map" checked
                                     onchange="setLayerVisible('map', this.checked)"><span
                                     class="legend-swatch legend-swatch-map"></span>Map</label>
@@ -240,13 +239,13 @@
                             onclick="event.stopPropagation()">
                             <button class="map-pose-popup-close" type="button" onclick="closePoseActionPopup()"
                                 aria-label="Close">&times;</button>
-                            <div class="map-pose-popup-title">Pose selected</div>
-                            <div id="map-pose-popup-pose" class="map-pose-popup-pose">X 0.00 | Y 0.00 | Yaw 0.0°</div>
+                            <div class="map-pose-popup-title">Pose selected (Z=0)</div>
+                            <div id="map-pose-popup-pose" class="map-pose-popup-pose">X 0.00 | Y 0.00 | Z 0.00 | Yaw 0.0°</div>
                             <div id="map-pose-single-actions">
                                 <button type="button" class="primary-action" onclick="popupNavigateToPoint()">Navigate to
                                 point</button>
                                 <button type="button" onclick="popupSetInitialCheckpoint()">Set initial checkpoint</button>
-                                <button type="button" onclick="popupAddWaypoint()">Add to waypoints</button>
+                                <button type="button" onclick="popupAddWaypoint()">Add waypoint (Z=0)</button>
                             </div>
                             <div id="map-pose-waypoint-actions" hidden>
                                 <button type="button" class="primary-action" onclick="popupCancelWaypoint()">Cancel waypoint</button>
@@ -453,7 +452,16 @@
             btn.textContent = collapsed ? 'Show' : 'Hide';
         }
 
-        // Ask Helio is positioned by CSS at the bottom center of the dashboard.
+        function performLogout() {
+            try {
+                localStorage.clear();
+                sessionStorage.clear();
+                document.cookie.split(";").forEach((c) => {
+                    document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date(0).toUTCString() + ";path=/");
+                });
+            } catch (_) {}
+            window.location.replace('index.html');
+        }
     </script>
 </body>
 

@@ -281,8 +281,8 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .legend-swatch { width:11px; height:11px; border-radius:3px; flex:0 0 auto; display:inline-block; }
 .legend-swatch-map { background:#8c94a4; }
 .legend-swatch-plan { background:var(--primary); }
-.legend-swatch-local { background:#ff8c00; }
-.legend-swatch-global { background:#9c27b0; }
+.legend-swatch-local { background:#00ffff; }
+.legend-swatch-global { background:#ff00ff; }
 
 /* ----- Map pose action popup ----- */
 .map-pose-popup {
@@ -547,13 +547,14 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .robot-face.waking .eye{animation:helioWake .5s ease-out 1}
 .robot-face.listening .eye{animation:helioBreath 2.6s ease-in-out infinite}
 .robot-face.thinking .eye{animation:helioThink 1s ease-in-out infinite;background:#0d84ff;height:clamp(60px,10vh,96px);border-radius:26px}
-.robot-face.speaking .eye{animation:helioSpeak .5s ease-in-out infinite;background:#25a1ff}
-.robot-face.happy .eye{height:clamp(58px,10vh,96px);border-radius:26px 26px 46px 46px}
+.robot-face.speaking .eye{animation:helioSpeak .35s ease-in-out infinite;background:#25a1ff}
+.robot-face.happy .eye{height:clamp(58px,10vh,96px);border-radius:26px 26px 46px 46px;background:#10b981;box-shadow:0 0 40px rgba(16,185,129,0.7)}
+.robot-face.sad .eye{height:clamp(90px,12vh,150px);border-radius:46px 46px 26px 26px;background:#6366f1}
 .robot-face.blink .eye{animation:helioBlink .22s ease-in-out 1}
 @keyframes helioWake{0%{transform:scaleY(.15)}55%{transform:scaleY(1.12)}100%{transform:scaleY(1)}}
 @keyframes helioBlink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.08)}}
 @keyframes helioBreath{0%,100%{transform:scaleY(.98)}50%{transform:scaleY(1.015)}}
-@keyframes helioSpeak{0%,100%{transform:scaleY(1) scaleX(1)}50%{transform:scaleY(.62) scaleX(1.08)}}
+@keyframes helioSpeak{0%,100%{transform:scaleY(1) scaleX(1)}50%{transform:scaleY(.45) scaleX(1.18)}}
 @keyframes helioThink{0%,50%,100%{transform:translateY(0)}25%{transform:translateY(-10px)}75%{transform:translateY(10px)}}
 
 /* consecutive "sending to server" dots, inside the black screen */
