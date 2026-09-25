@@ -239,6 +239,21 @@
                         <div class="map-overlay mono" id="map-cursor">x — y —</div>
                         <div class="map-overlay right mono" id="map-grid-label">Grid 1 m</div>
 
+                        <div class="map-legend" id="map-legend">
+                            <label><input type="checkbox" id="legend-map" checked
+                                    onchange="setLayerVisible('map', this.checked)"><span
+                                    class="legend-swatch legend-swatch-map"></span>Map</label>
+                            <label><input type="checkbox" id="legend-plan" checked
+                                    onchange="setLayerVisible('plan', this.checked)"><span
+                                    class="legend-swatch legend-swatch-plan"></span>Planned Path</label>
+                            <label><input type="checkbox" id="legend-local" checked
+                                    onchange="setLayerVisible('localCostmap', this.checked)"><span
+                                    class="legend-swatch legend-swatch-local"></span>Local CostMap</label>
+                            <label><input type="checkbox" id="legend-global" checked
+                                    onchange="setLayerVisible('globalCostmap', this.checked)"><span
+                                    class="legend-swatch legend-swatch-global"></span>Global CostMap</label>
+                        </div>
+
                         <div id="map-pose-popup" class="map-pose-popup" role="dialog" aria-label="Map pose actions"
                             onpointerdown="event.stopPropagation()" onpointerup="event.stopPropagation()"
                             onclick="event.stopPropagation()">

@@ -62,10 +62,20 @@ const TOPICS = {
     cmdVel: '/cmd_vel',
     plan: '/plan',
     wheel: '/wheel_states',
+    jointStates: '/joint_states',
+    localCostmap: '/local_costmap/costmap',
+    globalCostmap: '/global_costmap/costmap',
     joy: '/joy',
     tf: '/tf',
     tfStatic: '/tf_static'
 };
+
+// --- Layer visibility, driven by the map legend checkboxes ---
+const layerVis = { map: true, plan: true, localCostmap: true, globalCostmap: true };
+function setLayerVisible(key, visible) {
+    layerVis[key] = !!visible;
+    needsDraw = true;
+}
 const MAP_FRAME = 'map';
 
 const MODE_LABELS = { auto_nav: 'Autonomous Driving and Mapping' };
@@ -331,6 +341,89 @@ function onWheelStates(msg) {
     }
 }
 
+// ----- /joint_states (sensor_msgs/JointState): the real source of wheel motor data -----
+// Maps whatever the joint is named (front_left_wheel_joint, wheel_fl, fl_joint, ...) to fl/fr/bl/br.
+function matchWheelIdFromJointName(name) {
+    const n = String(name || '').toLowerCase();
+    const isFront = /front|\bfl\b|\bfr\b|_f_|^f_|_f$/.test(n) && !/rear|back/.test(n);
+    const isRear = /rear|back|\bbl\b|\bbr\b|_r_|^r_|_r$/.test(n) && !/front/.test(n);
+    const isLeft = /left|\bfl\b|\bbl\b|_l_|^l_|_l$/.test(n) && !/right/.test(n);
+    const isRight = /right|\bfr\b|\bbr\b|_r_(?!ear)|^r_(?!ear)|_r$/.test(n) && !/left/.test(n);
+
+    if (/\bfl\b/.test(n) || (isFront && isLeft)) return 'fl';
+    if (/\bfr\b/.test(n) || (isFront && isRight)) return 'fr';
+    if (/\bbl\b/.test(n) || (isRear && isLeft)) return 'bl';
+    if (/\bbr\b/.test(n) || (isRear && isRight)) return 'br';
+    return null;
+}
+
+function onJointStates(msg) {
+    const names = msg.name || [];
+    const vel = msg.velocity || [];
+    const pos = msg.position || [];
+    if (!names.length) return;
+    const now = performance.now() / 1000;
+    names.forEach((name, idx) => {
+        const id = matchWheelIdFromJointName(name);
+        if (!id) return;
+        // Prefer velocity (rad/s or m/s, matches "actual" wheel speed); fall back to position delta.
+        const v = vel.length ? Number(vel[idx]) : NaN;
+        const p = pos.length ? Number(pos[idx]) : NaN;
+        const value = Number.isFinite(v) ? v : p;
+        if (Number.isFinite(value)) ingestWheel({ id, a: value }, now);
+    });
+}
+
+// ----- Local / global costmaps (nav_msgs/OccupancyGrid), rendered as toggleable overlays -----
+let latestLocalCostmap = null, latestGlobalCostmap = null;
+let localCostmapDirty = false, globalCostmapDirty = false;
+const localCostmapCanvasOff = document.createElement('canvas');
+const globalCostmapCanvasOff = document.createElement('canvas');
+
+function onLocalCostmapMsg(msg) {
+    const info = msg.info;
+    if (!info || !info.width || !info.height) return;
+    latestLocalCostmap = {
+        w: info.width, h: info.height, res: info.resolution,
+        ox: info.origin.position.x, oy: info.origin.position.y,
+        yaw: yawFromQuat(info.origin.orientation), data: toInt8Array(msg.data)
+    };
+    localCostmapDirty = true; needsDraw = true;
+}
+
+function onGlobalCostmapMsg(msg) {
+    const info = msg.info;
+    if (!info || !info.width || !info.height) return;
+    latestGlobalCostmap = {
+        w: info.width, h: info.height, res: info.resolution,
+        ox: info.origin.position.x, oy: info.origin.position.y,
+        yaw: yawFromQuat(info.origin.orientation), data: toInt8Array(msg.data)
+    };
+    globalCostmapDirty = true; needsDraw = true;
+}
+
+function rebuildCostmapImage(costmap, canvasOff, rgb) {
+    if (!costmap) return;
+    canvasOff.width = costmap.w; canvasOff.height = costmap.h;
+    const ctx = canvasOff.getContext('2d');
+    const img = ctx.createImageData(costmap.w, costmap.h), d = img.data;
+    for (let j = 0; j < costmap.h; j++) {
+        for (let i = 0; i < costmap.w; i++) {
+            const v = costmap.data[j * costmap.w + i], k = (j * costmap.w + i) * 4;
+            // Only paint cost > 0; unknown (-1) and free (0) stay transparent so the
+            // base map shows through and the overlay reads as "where the cost is".
+            if (v > 0) {
+                const t = Math.min(v, 100) / 100;
+                d[k] = rgb[0]; d[k + 1] = rgb[1]; d[k + 2] = rgb[2];
+                d[k + 3] = Math.round(60 + t * 150);
+            }
+        }
+    }
+    ctx.putImageData(img, 0, 0);
+}
+function rebuildLocalCostmapImage() { rebuildCostmapImage(latestLocalCostmap, localCostmapCanvasOff, [255, 140, 0]); }   // orange
+function rebuildGlobalCostmapImage() { rebuildCostmapImage(latestGlobalCostmap, globalCostmapCanvasOff, [156, 39, 176]); } // purple
+
 function onMapMsg(msg) {
     const info = msg.info;
     if (!info || !info.width || !info.height) return;
@@ -389,6 +482,9 @@ function subscribeAllTopics() {
     }, { queue_length: 1 });
     rosSubscribe(TOPICS.plan, 'nav_msgs/Path', onPlanMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.wheel, 'std_msgs/String', onWheelStates);
+    rosSubscribe(TOPICS.jointStates, 'sensor_msgs/JointState', onJointStates, { queue_length: 1 });
+    rosSubscribe(TOPICS.localCostmap, 'nav_msgs/OccupancyGrid', onLocalCostmapMsg, { queue_length: 1 });
+    rosSubscribe(TOPICS.globalCostmap, 'nav_msgs/OccupancyGrid', onGlobalCostmapMsg, { queue_length: 1 });
 
     joyTopic = new ROSLIB.Topic({ ros, name: TOPICS.joy, messageType: 'sensor_msgs/Joy' });
     joyTopic.advertise();
@@ -815,15 +911,16 @@ function rebuildMapImage() {
         return c.getImageData(0, 0, 1, 1).data;
     };
     const free = parse(theme['--map-free']), occ = parse(theme['--map-occ']);
+    // Hard threshold instead of a grey gradient: cells read clearly as free or
+    // occupied (occupancy-grid convention: 0 = free, 100 = occupied, <0 = unknown).
+    const OCC_THRESHOLD = 65;
     for (let j = 0; j < m.h; j++) {
         for (let i = 0; i < m.w; i++) {
             const v = m.data[j * m.w + i], k = (j * m.w + i) * 4;
             if (v < 0) { d[k + 3] = 0; }
             else {
-                const t = Math.min(v, 100) / 100;
-                d[k] = free[0] + (occ[0] - free[0]) * t;
-                d[k + 1] = free[1] + (occ[1] - free[1]) * t;
-                d[k + 2] = free[2] + (occ[2] - free[2]) * t;
+                const col = v >= OCC_THRESHOLD ? occ : free;
+                d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2];
                 d[k + 3] = 255;
             }
         }
@@ -895,6 +992,47 @@ function drawPathWithArrows(ctx, points, color) {
     }
 }
 
+// Straight dashed line from the rover to the pending goal, with a marching-ants
+// animation and an arrowhead at the destination. Shown only between "goal sent"
+// and the moment Nav2's real /plan arrives.
+function drawAnimatedInterimPath(ctx, from, to, color) {
+    const p1 = w2s(from.x, from.y), p2 = w2s(to.x, to.y);
+    const dashLen = 10, gapLen = 7;
+    const nowMs = performance.now();
+    color = color || '#ffb020';
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([dashLen, gapLen]);
+    ctx.lineDashOffset = -((nowMs / 40) % (dashLen + gapLen));
+    ctx.beginPath();
+    ctx.moveTo(p1[0], p1[1]);
+    ctx.lineTo(p2[0], p2[1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+    const pulse = 1 + 0.15 * Math.sin(nowMs / 220);
+    ctx.save();
+    ctx.translate(p2[0], p2[1]);
+    ctx.rotate(angle);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = theme['--panel'];
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(16, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    ctx.font = '700 11px Roboto, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillStyle = color;
+    ctx.fillText('PLANNING…', p2[0], p2[1] - 16);
+}
+
 function drawMap() {
     const dpr = window.devicePixelRatio || 1;
     const W = mapCanvas.clientWidth, H = mapCanvas.clientHeight;
@@ -908,15 +1046,19 @@ function drawMap() {
 
     if (follow && robot) { view.vx = robot.x; view.vy = robot.y; }
 
-    if (latestMap) {
-        const m = latestMap, c = Math.cos(m.yaw), s = Math.sin(m.yaw), k = m.res * view.s;
+    function drawGrid(m, offCanvas) {
+        if (!m) return;
+        const c = Math.cos(m.yaw), s = Math.sin(m.yaw), k = m.res * view.s;
         ctx.save();
         ctx.imageSmoothingEnabled = false;
         ctx.transform(-k * s, -k * c, -k * c, k * s,
             W / 2 - (m.oy - view.vy) * view.s, H / 2 - (m.ox - view.vx) * view.s);
-        ctx.drawImage(mapCanvasOff, 0, 0);
+        ctx.drawImage(offCanvas, 0, 0);
         ctx.restore();
     }
+    if (layerVis.map && latestMap) drawGrid(latestMap, mapCanvasOff);
+    if (layerVis.globalCostmap && latestGlobalCostmap) drawGrid(latestGlobalCostmap, globalCostmapCanvasOff);
+    if (layerVis.localCostmap && latestLocalCostmap) drawGrid(latestLocalCostmap, localCostmapCanvasOff);
 
     const step = view.s >= 6 ? 1 : (view.s >= 1.5 ? 5 : 10);
     document.getElementById('map-grid-label').textContent = 'Grid ' + step + ' m';
@@ -937,10 +1079,13 @@ function drawMap() {
     ctx.strokeStyle = '#e5484d'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ax[0], ax[1]); ctx.stroke();
     ctx.strokeStyle = '#30a46c'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ay[0], ay[1]); ctx.stroke();
 
-    if (latestPlan && latestPlan.length > 0) {
+    if (layerVis.plan && latestPlan && latestPlan.length > 0) {
         drawPathWithArrows(ctx, latestPlan, theme['--primary']);
         const finalPt = latestPlan[latestPlan.length - 1];
         drawArrow(ctx, finalPt.x, finalPt.y, finalPt.yaw, theme['--danger'], 'GOAL', 28);
+    } else if (layerVis.plan && navStatus === 'Planning' && missionGoal && robot) {
+        // Goal sent, no /plan yet: show an animated straight line toward the destination.
+        drawAnimatedInterimPath(ctx, robot, missionGoal);
     }
 
     const WPCOL = '#E8A317', TCOL = '#0077ff';
@@ -1181,6 +1326,10 @@ function frame(ts) {
         if (!viewFitted) fitMapView();
         needsDraw = true;
     }
+    if (localCostmapDirty && latestLocalCostmap) { rebuildLocalCostmapImage(); localCostmapDirty = false; needsDraw = true; }
+    if (globalCostmapDirty && latestGlobalCostmap) { rebuildGlobalCostmapImage(); globalCostmapDirty = false; needsDraw = true; }
+    // Keep redrawing while a goal is being planned so the animated straight-line path can move.
+    if (navStatus === 'Planning' && missionGoal && (!latestPlan || latestPlan.length === 0)) needsDraw = true;
     if (follow || needsDraw) { drawMap(); needsDraw = false; }
     if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
     requestAnimationFrame(frame);
