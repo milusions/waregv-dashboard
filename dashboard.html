@@ -90,7 +90,6 @@
         <header class="header-bar">
             <div class="header-title">
                 <span id="header-brand" class="header-brand">Milusions <small>WareGV Suite</small></span>
-                <h2>Autonomous Navigation Dashboard</h2>
             </div>
 
             <div class="header-actions">
@@ -158,6 +157,21 @@
                         </div>
                         <div class="kv"><span class="k">Location</span>
                             <span class="v mono" id="stat-location">X — &nbsp; Y —</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- NEW CAMERA PANEL -->
+                <section class="panel camera-panel" style="flex: 0 0 240px; min-height: 240px;">
+                    <div class="panel-hd"><span>Camera</span></div>
+                    <div class="panel-body" style="display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; overflow: hidden;">
+                        <div style="flex: 1; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+                            <span style="position: absolute; top: 4px; left: 6px; font-size: 0.6rem; font-weight: 700; color: #fff; background: rgba(0,0,0,0.6); padding: 2px 4px; border-radius: 3px; z-index: 10;">RGB</span>
+                            <img id="cam-rgb" style="width: 100%; height: 100%; object-fit: contain; display: block;" alt="RGB feed">
+                        </div>
+                        <div style="flex: 1; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+                            <span style="position: absolute; top: 4px; left: 6px; font-size: 0.6rem; font-weight: 700; color: #fff; background: rgba(0,0,0,0.6); padding: 2px 4px; border-radius: 3px; z-index: 10;">DEPTH</span>
+                            <img id="cam-depth" style="width: 100%; height: 100%; object-fit: contain; display: block;" alt="Depth feed">
                         </div>
                     </div>
                 </section>
@@ -446,6 +460,16 @@
             } catch (_) {}
             window.location.replace('login.html');
         }
+
+        // --- Camera Feeds Resolver ---
+        // Dynamically loads the camera streams using the authenticated rover IP
+        setTimeout(() => {
+            const ip = window.ROVER_IP || localStorage.getItem('Rover host') || '127.0.0.1';
+            const rgbCam = document.getElementById('cam-rgb');
+            const depthCam = document.getElementById('cam-depth');
+            if(rgbCam) rgbCam.src = `http://${ip}:5000/video_feed`;
+            if(depthCam) depthCam.src = `http://${ip}:5000/depth_feed`;
+        }, 500);
     </script>
 </body>
 

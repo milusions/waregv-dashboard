@@ -202,7 +202,8 @@ body {
 }
 .header-title{display:flex;align-items:baseline;gap:14px;min-width:0}
 .header-title h2 { font-size: 1rem; font-weight: 600; margin: 0; color: var(--text); }
-.header-brand{display:none;color:var(--primary);font-size:1rem;font-weight:800;white-space:nowrap}.header-brand small{display:block;color:var(--muted);font-size:.52rem;letter-spacing:.14em;text-transform:uppercase}
+.header-brand{display:inline-block;color:var(--primary);font-size:1rem;font-weight:900;white-space:nowrap;line-height:1.1}
+.header-brand small{display:block;color:var(--muted);font-size:.85rem;letter-spacing:.15em;text-transform:uppercase;font-weight:700;margin-top:2px}
 .header-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; justify-content: flex-end; }
 
 .status-badge {
@@ -702,7 +703,6 @@ body:has(.voice-modal.active) .helio-fab-wrap{display:none}
 .sidebar-collapsed .nav-menu{display:none}
 .sidebar-collapsed .main-wrapper{min-width:0}
 .sidebar-collapsed .header-title{padding-left:44px}
-.sidebar-collapsed .header-brand{display:inline-block}
 .sidebar-collapsed .sidebar-toggle-btn{position:absolute;left:6px;top:14px;width:34px;height:34px;background:var(--panel);border:1px solid var(--border);border-radius:7px;box-shadow:0 4px 12px rgba(0,0,0,.12);color:var(--primary)}
 
 @media (max-width:1050px){.helio-top-right{right:14px}}
