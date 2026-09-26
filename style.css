@@ -625,8 +625,8 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .voice-modal.active{display:block;opacity:1}
 .modal-assistant-title{position:absolute;top:34px;left:50%;transform:translateX(-50%);color:#111;font-size:2rem;line-height:1;font-weight:800;letter-spacing:.02em;z-index:20}
 .helio-top-right{position:absolute;top:22px;right:24px;display:flex;align-items:center;gap:10px;z-index:30}
-.helio-top-right .icon-btn{width:42px;height:42px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.075);border:1px solid rgba(255,255,255,.16);color:#fff;cursor:pointer;transition:background .18s ease,transform .18s ease,border-color .18s ease}
-.helio-top-right .icon-btn:hover{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28);transform:translateY(-1px)}
+.helio-top-right .icon-btn{width:42px;height:42px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.14);color:#12151c;cursor:pointer;transition:background .18s ease,transform .18s ease,border-color .18s ease}
+.helio-top-right .icon-btn:hover{background:rgba(0,0,0,.12);border-color:rgba(0,0,0,.24);transform:translateY(-1px)}
 .helio-top-right .icon-btn svg{width:19px;height:19px;fill:currentColor}.helio-top-right .icon-btn.close{font-size:1.7rem;line-height:1}
 .lang-toggle-wrap.mini{display:flex;gap:3px;padding:4px;margin:0;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:rgba(255,255,255,.07)}
 .lang-toggle-wrap.mini .lang-btn{min-width:38px;height:30px;padding:0 9px;border:0;border-radius:16px;background:transparent;color:#9aa4b2;font-size:.76rem;font-weight:800;cursor:pointer}
@@ -987,12 +987,18 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
 .waergv-panel-copy small { font-size: .64rem; font-weight: 500; opacity: .84; white-space: nowrap; }
 .waergv-panel-arrow { position: relative; z-index:2; margin-left:auto; font-size:1.35rem; font-weight:400; opacity:.9; transition:transform .18s ease; }
 .waergv-panel:hover .waergv-panel-arrow { transform: translateX(4px); }
-.waergv-sparkle { position:absolute; z-index:2; color:#fff; pointer-events:none; line-height:1; opacity:.8; text-shadow:0 0 9px rgba(255,255,255,.8); animation: waergvSparkle 2.8s ease-in-out infinite; }
-.waergv-s1 { right:58px; top:10px; font-size:12px; }
-.waergv-s2 { right:28px; top:25px; font-size:8px; animation-delay:.7s; }
-.waergv-s3 { right:78px; bottom:12px; font-size:7px; animation-delay:1.35s; }
-.waergv-s4 { right:17px; bottom:13px; font-size:13px; animation-delay:1.9s; }
-@keyframes waergvSparkle { 0%,100% { transform:scale(.65) rotate(0deg); opacity:.3; } 45% { transform:scale(1.12) rotate(18deg); opacity:1; } 65% { transform:scale(.8) rotate(35deg); opacity:.55; } }
+.waergv-sparkle { position:absolute; z-index:2; color:#fff; pointer-events:none; line-height:1; opacity:.85; text-shadow:0 0 10px rgba(255,255,255,.9), 0 0 18px rgba(255,255,255,.6); animation: waergvSparkle 2.2s ease-in-out infinite; }
+.waergv-s1 { right:58px; top:10px; font-size:14px; }
+.waergv-s2 { right:28px; top:25px; font-size:9px; animation-delay:.5s; }
+.waergv-s3 { right:78px; bottom:12px; font-size:8px; animation-delay:1s; }
+.waergv-s4 { right:17px; bottom:13px; font-size:15px; animation-delay:1.5s; }
+.waergv-s5 { left:22px; top:12px; font-size:10px; animation-delay:.25s; }
+.waergv-s6 { left:44px; bottom:10px; font-size:12px; animation-delay:.9s; }
+.waergv-s7 { right:100px; top:38%; font-size:7px; animation-delay:1.7s; }
+.waergv-s8 { left:70px; top:20%; font-size:8px; animation-delay:2.1s; }
+@keyframes waergvSparkle { 0%,100% { transform:scale(.5) rotate(0deg); opacity:.15; } 45% { transform:scale(1.35) rotate(25deg); opacity:1; } 65% { transform:scale(.7) rotate(45deg); opacity:.5; } }
+.waergv-panel::after { content:""; position:absolute; inset:-40%; z-index:1; background:conic-gradient(from 0deg, transparent 0deg, rgba(255,255,255,.35) 25deg, transparent 55deg, transparent 180deg, rgba(255,255,255,.25) 205deg, transparent 235deg); animation: waergvShine 3.2s linear infinite; pointer-events:none; mix-blend-mode: overlay; }
+@keyframes waergvShine { to { transform: rotate(360deg); } }
 
 .nav2-logs-panel { flex: 0 0 184px; min-height:184px; }
 .nav2-logs-carousel { height:100%; min-height:0; display:grid; grid-template-columns:28px minmax(0,1fr) 28px; align-items:center; gap:4px; padding:7px; }
@@ -1164,9 +1170,8 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     overflow: hidden !important;
 }
 
-/* Ask Helio — fits content only, no forced square. */
+/* Ask Helio — fits content only, sits between System Status and Joystick (DOM order). */
 .side > .waergv-panel {
-    order: 2 !important;
     flex: 0 0 auto !important;
     width: 100% !important;
     height: auto !important;

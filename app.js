@@ -3007,8 +3007,8 @@ async function localAssistant(raw) {
 const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
 // Fuzzy phonetic variants so mispronunciation / misrecognition still triggers the wake word.
 const WAKE_PATTERNS = {
-    robot: /\bhe?y?\s*(robot|robo|robut|ro-?bot|rowbot|robort|robaut|row\s*bot|robotic|rob it|rob ot|robo t)\b/i,
-    jojo: /\bhe?y?\s*(jojo|jo-?jo|jo\s*jo|joe\s*joe|joejoe|jojoe|jojou|joj-?o|choco|jhojho|jyojyo)\b/i
+    robot: /\b(he?y|hi|okay|ok)?\s*(robot|robo|robut|ro-?bot|rowbot|robort|robaut|row\s*bot|robotic|rob it|rob ot|robo t|robert)\b/i,
+    jojo: /\b(he?y|hi|okay|ok)?\s*(jojo|jo-?jo|jo\s*jo|joe\s*joe|joejoe|jojoe|jojou|joj-?o|jhojho|jyojyo|jojoy|dojo)\b/i
 };
 let wakeWord = 'robot';
 let wakeEnabled = true;
