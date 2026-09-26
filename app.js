@@ -178,6 +178,7 @@ async function toggleDocumentFullscreen() {
 }
 
 document.addEventListener('fullscreenchange', updateDocumentFullscreenButton);
+document.addEventListener('DOMContentLoaded', () => renderNav2Logs());
 window.toggleDocumentFullscreen = toggleDocumentFullscreen;
 
 // =====================================================================
@@ -202,6 +203,9 @@ let nav2ActiveNode = null;         // last BT leaf/control node reported RUNNING
 let nav2Stage = null;              // human label shown in the map tag, e.g. 'Recovery: Spin'
 let nav2StatusMsgAt = 0;           // last time we heard a *real* Nav2 status/BT message
 let nav2LastError = null;          // { text, node, level, ts } - most recent rosout WARN/ERROR from a nav2 node
+const nav2LogHistory = [];          // stored Nav2 WARN/ERROR messages for the Logs carousel
+let nav2LogIndex = -1;
+const NAV2_LOG_HISTORY_MAX = 50;
 const NAV2_STATUS_FRESH_MS = 4000; // how long a real Nav2 signal is considered authoritative
 const NAV2_ERROR_BUBBLE_MS = 12000; // how long the chat-bubble stays up after an error
 const NAV2_NODE_RE = /bt_navigator|controller_server|planner_server|recoveries_server|behavior_server|waypoint_follower|smoother_server|velocity_smoother|collision_monitor|costmap/i;
@@ -260,11 +264,96 @@ const ROSOUT_WARN = 30, ROSOUT_ERROR = 40, ROSOUT_FATAL = 50;
 function onRosoutMsg(msg) {
     if (!msg || msg.level < ROSOUT_WARN) return;
     if (!NAV2_NODE_RE.test(msg.name || '')) return;
-    nav2LastError = { text: msg.msg, node: msg.name, level: msg.level, ts: Date.now() };
-    nav2StatusMsgAt = Date.now();
+
+    const entry = {
+        text: String(msg.msg || '').trim(),
+        node: String(msg.name || 'Nav2'),
+        level: Number(msg.level) >= ROSOUT_FATAL ? 'FATAL' : (Number(msg.level) >= ROSOUT_ERROR ? 'ERROR' : 'WARN'),
+        levelCode: Number(msg.level),
+        ts: Date.now()
+    };
+    if (!entry.text) return;
+
+    nav2LastError = entry;
+    nav2StatusMsgAt = entry.ts;
+
+    // Avoid filling the carousel with an identical burst from the same node.
+    const previous = nav2LogHistory[nav2LogHistory.length - 1];
+    if (!previous || previous.text !== entry.text || previous.node !== entry.node || previous.level !== entry.level) {
+        nav2LogHistory.push(entry);
+        while (nav2LogHistory.length > NAV2_LOG_HISTORY_MAX) nav2LogHistory.shift();
+        nav2LogIndex = nav2LogHistory.length - 1;
+        renderNav2Logs();
+    } else {
+        // Refresh the timestamp of the current repeated message.
+        previous.ts = entry.ts;
+        nav2LogIndex = nav2LogHistory.length - 1;
+        renderNav2Logs();
+    }
+
     needsDraw = true;
-    if (msg.level >= ROSOUT_ERROR) notify('ERROR', '[' + msg.name + '] ' + msg.msg);
+    if (Number(msg.level) >= ROSOUT_ERROR) notify('ERROR', '[' + msg.name + '] ' + msg.msg);
 }
+
+function formatNav2LogTime(ts) {
+    try {
+        return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (_) { return '--:--:--'; }
+}
+
+function renderNav2Logs() {
+    const card = document.getElementById('nav2-log-card');
+    const count = document.getElementById('nav2-log-count');
+    const prev = document.getElementById('nav2-log-prev');
+    const next = document.getElementById('nav2-log-next');
+    if (!card) return;
+
+    const total = nav2LogHistory.length;
+    if (count) count.textContent = total + (total === 1 ? ' stored' : ' stored');
+
+    if (!total) {
+        card.innerHTML = '<div class="nav2-log-empty">No Nav2 warnings or errors yet.</div>';
+        if (prev) prev.disabled = true;
+        if (next) next.disabled = true;
+        return;
+    }
+
+    nav2LogIndex = Math.max(0, Math.min(nav2LogIndex, total - 1));
+    const entry = nav2LogHistory[nav2LogIndex];
+    const levelClass = String(entry.level || 'WARN').toLowerCase();
+    card.innerHTML = `
+        <div class="nav2-log-top">
+            <span class="nav2-log-level ${levelClass}">${entry.level}</span>
+            <span class="nav2-log-position mono">${nav2LogIndex + 1} / ${total}</span>
+        </div>
+        <div class="nav2-log-node">${escapeHtml(entry.node)}</div>
+        <div class="nav2-log-message">${escapeHtml(entry.text)}</div>
+        <div class="nav2-log-time mono">${formatNav2LogTime(entry.ts)}</div>`;
+
+    if (prev) prev.disabled = total <= 1;
+    if (next) next.disabled = total <= 1;
+}
+
+function previousNav2Log() {
+    if (!nav2LogHistory.length) return;
+    nav2LogIndex = (nav2LogIndex - 1 + nav2LogHistory.length) % nav2LogHistory.length;
+    renderNav2Logs();
+}
+
+function nextNav2Log() {
+    if (!nav2LogHistory.length) return;
+    nav2LogIndex = (nav2LogIndex + 1) % nav2LogHistory.length;
+    renderNav2Logs();
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+    }[ch]));
+}
+
+window.previousNav2Log = previousNav2Log;
+window.nextNav2Log = nextNav2Log;
 
 function onBTLogMsg(msg) {
     const events = (msg && msg.event_log) || [];

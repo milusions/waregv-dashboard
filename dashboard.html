@@ -76,8 +76,8 @@
                 </div>
             </div>
             <nav class="nav-menu">
-                <a class="nav-item active">
-                    <svg viewBox="0 0 24 24">
+                <a class="nav-item active" data-tooltip="Dashboard" aria-label="Dashboard">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M3 3h8v10H3V3zm10 0h8v6h-8V3zM3 15h8v6H3v-6zm10-4h8v10h-8V11z" />
                     </svg>
                     <span class="lbl">Dashboard</span>
@@ -92,25 +92,9 @@
                 <span id="header-brand" class="header-brand">Milusions <small>WareGV Suite</small></span>
                 <h2>Autonomous Navigation Dashboard</h2>
             </div>
+
             <div class="header-actions">
                 <span id="ros-status" class="status-badge connected">UI Ready (Offline)</span>
-                <div class="helio-fab-wrap">
-                    <div id="helio-peek" class="helio-peek-container" aria-hidden="true">
-                        <div class="peek-robot-head">
-                            <div class="peek-eye"></div>
-                            <div class="peek-eye"></div>
-                        </div>
-                        <div id="peek-bubble" class="peek-speech-bubble">Hey there, how are you?</div>
-                    </div>
-                    <button class="helio-fab" type="button" onclick="openVoiceModal()" title="Ask Helio">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 2l1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8L12 2z" />
-                            <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z" opacity=".7" />
-                            <path d="M5 14l.7 1.6L7.3 16.3 5.7 17 5 18.6 4.3 17l-1.6-.7L4.3 15.6 5 14z" opacity=".7" />
-                        </svg>
-                        <span>Ask Helio</span>
-                    </button>
-                </div>
                 <div class="wake-menu-wrap">
                     <button id="wake-btn" class="icon-btn wake-btn on" onclick="toggleWakeMenu(event)"
                         aria-haspopup="menu" aria-expanded="false" title="Wake word settings">
@@ -178,27 +162,38 @@
                     </div>
                 </section>
 
-                <section class="panel" style="flex:1;">
+                <section class="panel joystick-panel">
                     <div class="panel-hd"><span>Joystick</span><span class="sub mono">/cmd_vel_joy</span></div>
                     <div class="panel-body">
                         <div class="joy-wrap">
                             <div class="joy-pad" id="joy-pad">
                                 <div class="joy-knob" id="joy-knob"></div>
                             </div>
-                            <div class="joy-read mono" style="align-items: center; flex-wrap: wrap; gap: 6px;">
-                                <button id="joy-enable-btn" class="btn btn-secondary"
-                                    style="height: 22px; padding: 0 8px; font-size: 0.65rem;"
+
+                            <div class="joy-control-row">
+                                <button id="joy-enable-btn" class="btn btn-secondary joy-enable-btn"
                                     onclick="toggleJoyEnable()">Enable</button>
-                                <span>fwd <b id="joy-y">0.00</b></span>
-                                <span>turn <b id="joy-x">0.00</b></span>
+                                <div class="joy-output">
+                                    <div class="joy-value"><span>Forward</span><b id="joy-y">0.00</b></div>
+                                    <div class="joy-value"><span>Turn</span><b id="joy-x">0.00</b></div>
+                                </div>
                             </div>
-                            <div class="joy-read mono" style="align-items: center; gap: 6px;">
-                                <label for="joy-max-vel" style="font-size:0.65rem;">max vel (m/s)</label>
-                                <input id="joy-max-vel" class="field" type="number" step="0.05" min="0" value="0.5"
-                                    style="width: 70px; height: 22px; padding: 0 6px; font-size: 0.65rem;">
-                                <label for="joy-max-ang" style="font-size:0.65rem;">max ang (rad/s)</label>
-                                <input id="joy-max-ang" class="field" type="number" step="0.05" min="0" value="1.0"
-                                    style="width: 70px; height: 22px; padding: 0 6px; font-size: 0.65rem;">
+
+                            <div class="joy-limits">
+                                <div class="joy-limit">
+                                    <label for="joy-max-vel">Max velocity</label>
+                                    <div class="joy-input-wrap">
+                                        <input id="joy-max-vel" class="field" type="number" step="0.05" min="0" value="0.5">
+                                        <span>m/s</span>
+                                    </div>
+                                </div>
+                                <div class="joy-limit">
+                                    <label for="joy-max-ang">Max angular</label>
+                                    <div class="joy-input-wrap">
+                                        <input id="joy-max-ang" class="field" type="number" step="0.05" min="0" value="1.0">
+                                        <span>rad/s</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -313,8 +308,23 @@
                 </div>
             </section>
 
-            <!-- System Mode (right) -->
+            <!-- Right column: Ask Helio -> System Mode -> Logs -->
             <div class="col-ctrl">
+                <!-- WAERGV / ASK HELIO: dedicated full-panel button directly below System Mode -->
+                <button id="waergv-panel" class="waergv-panel" type="button" onclick="openVoiceModal()"
+                    title="Ask Helio">
+                    <span class="waergv-sparkle waergv-s1" aria-hidden="true">✦</span>
+                    <span class="waergv-sparkle waergv-s2" aria-hidden="true">✧</span>
+                    <span class="waergv-sparkle waergv-s3" aria-hidden="true">✦</span>
+                    <span class="waergv-sparkle waergv-s4" aria-hidden="true">✧</span>
+                    <span class="waergv-panel-icon" aria-hidden="true">✦</span>
+                    <span class="waergv-panel-copy">
+                        <strong>ASK HELIO</strong>
+                        <small>WAERGV Intelligent Rover Assistant</small>
+                    </span>
+                    <span class="waergv-panel-arrow" aria-hidden="true">→</span>
+                </button>
+
                 <aside class="panel ctrl-panel">
                     <div class="panel-hd"><span>System Mode</span></div>
                     <div class="panel-body scroll">
@@ -344,6 +354,25 @@
                         </div>
                     </div>
                 </aside>
+
+                <!-- Persistent Nav2 log carousel -->
+                <section class="panel nav2-logs-panel" aria-label="Nav2 Logs">
+                    <div class="panel-hd">
+                        <span>Logs</span>
+                        <span class="sub mono" id="nav2-log-count">0 stored</span>
+                    </div>
+                    <div class="panel-body">
+                        <div class="nav2-logs-carousel" id="nav2-logs-carousel">
+                            <button class="nav2-log-arrow" id="nav2-log-prev" type="button" onclick="previousNav2Log()"
+                                aria-label="Previous Nav2 log">‹</button>
+                            <div class="nav2-log-card" id="nav2-log-card">
+                                <div class="nav2-log-empty">No Nav2 warnings or errors yet.</div>
+                            </div>
+                            <button class="nav2-log-arrow" id="nav2-log-next" type="button" onclick="nextNav2Log()"
+                                aria-label="Next Nav2 log">›</button>
+                        </div>
+                    </div>
+                </section>
             </div>
         </main>
     </div>
