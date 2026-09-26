@@ -621,9 +621,9 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 /* =====================================================================
    HELIO VOICE UI
    ===================================================================== */
-.voice-modal{position:fixed;inset:0;z-index:9999;display:none;overflow:hidden;background:rgba(7,9,13,.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);opacity:0;transition:opacity .18s ease}
+.voice-modal{position:fixed;inset:0;z-index:9999;display:none;overflow:hidden;background:#ffffff;backdrop-filter:none;-webkit-backdrop-filter:none;opacity:0;transition:opacity .18s ease}
 .voice-modal.active{display:block;opacity:1}
-.modal-assistant-title{position:absolute;top:34px;left:50%;transform:translateX(-50%);color:#fff;font-size:2rem;line-height:1;font-weight:800;letter-spacing:.02em;z-index:20}
+.modal-assistant-title{position:absolute;top:34px;left:50%;transform:translateX(-50%);color:#111;font-size:2rem;line-height:1;font-weight:800;letter-spacing:.02em;z-index:20}
 .helio-top-right{position:absolute;top:22px;right:24px;display:flex;align-items:center;gap:10px;z-index:30}
 .helio-top-right .icon-btn{width:42px;height:42px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.075);border:1px solid rgba(255,255,255,.16);color:#fff;cursor:pointer;transition:background .18s ease,transform .18s ease,border-color .18s ease}
 .helio-top-right .icon-btn:hover{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28);transform:translateY(-1px)}
@@ -639,16 +639,18 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .modal-main-column{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;padding:70px 24px 120px}
 
 /* ---- EMO-style screen: one big black square holding the eyes (~50% of viewport) ---- */
-.robot-screen{position:relative;display:flex;align-items:center;justify-content:center;width:min(50vw,72vh,860px);height:min(43vw,62vh,720px);aspect-ratio:auto;background:#000;border:12px solid #1b1f28;border-radius:64px;box-shadow:inset 0 0 60px rgba(0,0,0,.85),inset 0 0 2px rgba(255,255,255,.05),0 22px 60px rgba(0,0,0,.55),0 0 90px rgba(0,119,255,.10);overflow:hidden}
+.robot-screen{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;width:min(50vw,72vh,860px);height:min(43vw,62vh,720px);aspect-ratio:auto;background:#000000;border:12px solid #1b1f28;border-radius:64px;box-shadow:inset 0 0 60px rgba(0,0,0,.85),inset 0 0 2px rgba(255,255,255,.05),0 22px 60px rgba(0,0,0,.35),0 0 90px rgba(0,119,255,.10);overflow:hidden}
 .robot-screen::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,0) 30%);pointer-events:none}
-.robot-face{position:relative;display:flex;align-items:center;justify-content:center;gap:clamp(30px,6vw,70px);width:100%;height:100%;background:transparent;border:0;box-shadow:none;z-index:2}
-.robot-face .eye{position:relative;width:clamp(90px,10vw,168px);height:clamp(130px,15vh,240px);border-radius:38px;background:#0d84ff;box-shadow:0 0 34px rgba(13,132,255,.55),0 0 70px rgba(13,132,255,.25);transition:transform .28s ease-out,height .3s ease,width .3s ease,border-radius .3s ease,background .25s ease}
+.robot-face{position:relative;display:flex;align-items:center;justify-content:center;gap:clamp(30px,6vw,70px);width:100%;height:70%;background:transparent;border:0;box-shadow:none;z-index:2}
+.robot-face .eye{position:relative;width:clamp(90px,10vw,168px);height:clamp(130px,15vh,240px);border-radius:38px;background:#0077ff;box-shadow:0 0 34px rgba(0,119,255,.65),0 0 70px rgba(0,119,255,.3);transition:transform .28s ease-out,height .3s ease,width .3s ease,border-radius .3s ease,background .25s ease}
 .robot-face.waking .eye{animation:helioWake .5s ease-out 1}
 .robot-face.listening .eye{animation:helioBreath 2.6s ease-in-out infinite}
-.robot-face.thinking .eye{animation:helioThink 1s ease-in-out infinite;background:#0d84ff;height:clamp(60px,10vh,96px);border-radius:26px}
-.robot-face.speaking .eye{animation:helioSpeak .5s ease-in-out infinite;background:#25a1ff}
+.robot-face.thinking .eye{animation:helioThink 1s ease-in-out infinite;background:#0077ff;height:clamp(60px,10vh,96px);border-radius:26px}
+.robot-face.speaking .eye{animation:helioSpeak .5s ease-in-out infinite;background:#0077ff}
 .robot-face.happy .eye{height:clamp(58px,10vh,96px);border-radius:26px 26px 46px 46px}
 .robot-face.blink .eye{animation:helioBlink .22s ease-in-out 1}
+.helio-transcript{position:relative;z-index:3;margin-top:clamp(28px,6vh,56px);max-width:82%;min-height:1.4em;text-align:center;color:#fff;font-size:clamp(.95rem,1.6vw,1.25rem);font-weight:500;line-height:1.5;letter-spacing:.01em;opacity:0;transform:translateY(4px);transition:opacity .2s ease,transform .2s ease;text-shadow:0 0 12px rgba(0,119,255,.35)}
+.helio-transcript.show{opacity:1;transform:translateY(0)}
 @keyframes helioWake{0%{transform:scaleY(.15)}55%{transform:scaleY(1.12)}100%{transform:scaleY(1)}}
 @keyframes helioBlink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.08)}}
 @keyframes helioBreath{0%,100%{transform:scaleY(.98)}50%{transform:scaleY(1.015)}}
@@ -662,7 +664,7 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .helio-dots span:nth-child(2){animation-delay:.15s}
 .helio-dots span:nth-child(3){animation-delay:.3s}
 
-.helio-idle-bubble{position:absolute;top:86px;right:11%;max-width:250px;padding:9px 13px;border:1px solid rgba(0,119,255,.7);border-radius:5px 14px 14px 14px;background:rgba(20,22,26,.9);color:#fff;font-size:.78rem;opacity:0;transform:translateY(-5px) scale(.96);transition:opacity .25s ease,transform .25s ease;pointer-events:none}
+.helio-idle-bubble{position:absolute;top:86px;right:11%;max-width:270px;padding:11px 16px;border:1px solid rgba(0,119,255,.35);border-radius:6px 16px 16px 16px;background:#ffffff;color:#12151c;font-size:.82rem;font-weight:500;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.12),0 0 0 1px rgba(0,119,255,.06);opacity:0;transform:translateY(-5px) scale(.96);transition:opacity .25s ease,transform .25s ease;pointer-events:none}
 .helio-idle-bubble.show{opacity:1;transform:translateY(0) scale(1)}
 .helio-fab-wrap{position:relative;display:flex;align-items:center;justify-content:center;flex:none;margin:0}
 .helio-fab{position:relative;z-index:3;height:48px;padding:0 22px;min-width:168px;display:inline-flex;align-items:center;justify-content:center;gap:10px;border:1px solid rgba(255,255,255,.22);border-radius:12px;background:linear-gradient(135deg,#2f9bff 0%,#0067e8 55%,#0047ad 100%);box-shadow:0 0 0 1px rgba(255,255,255,.14) inset,0 0 0 4px rgba(0,119,255,.12),0 10px 26px rgba(0,86,214,.4);color:#fff;cursor:pointer;overflow:hidden;transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s ease,filter .18s ease}

@@ -2429,7 +2429,13 @@ const HelioIdleController = {
 };
 
 function setVoiceStatus() {}
-function renderTranscript() {}
+function renderTranscript() {
+    const el = document.getElementById('helio-transcript');
+    if (!el) return;
+    const text = [transcriptText, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    el.textContent = text;
+    el.classList.toggle('show', !!text);
+}
 
 function setFace(state) {
     if (robotFace) robotFace.className = 'robot-face ' + state;
@@ -2638,7 +2644,7 @@ function openVoiceModal() {
     activateHelio();
 }
 
-function activateHelio() {
+function activateHelio(greeting) {
     stopWake();
     helioOpen = true;
     notifyHelioState('helio_on', 'waking', '', 'helio_wake');
@@ -2648,6 +2654,7 @@ function activateHelio() {
     PeekController.stop();
 
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
+    renderTranscript();
     clearVoiceTimers();
     commandSeq += 1;
     const seq = commandSeq;
@@ -2656,7 +2663,8 @@ function activateHelio() {
 
     agentState = 'speaking';
     if (robotFace) robotFace.className = 'robot-face waking';
-    speakText('What?', { pitch: 1.0, rate: 0.72, volume: 1 }).then(() => {
+    const say = greeting || (wakeLanguageOverride === 'hi' ? 'क्या?' : 'What?');
+    speakText(say, { pitch: 1.0, rate: 0.72, volume: 1 }).then(() => {
         if (!helioOpen || seq !== commandSeq) return;
         resumeListening();
         scheduleBlink();
@@ -2680,6 +2688,7 @@ function closeVoiceModal() {
     if (blinkTimer) { clearTimeout(blinkTimer); blinkTimer = null; }
     if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
+    renderTranscript();
     PeekController.start();
     syncWake();
 }
@@ -2996,6 +3005,11 @@ async function localAssistant(raw) {
 //  Wake word
 // =====================================================================
 const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
+// Fuzzy phonetic variants so mispronunciation / misrecognition still triggers the wake word.
+const WAKE_PATTERNS = {
+    robot: /\bhe?y?\s*(robot|robo|robut|ro-?bot|rowbot|robort|robaut|row\s*bot|robotic|rob it|rob ot|robo t)\b/i,
+    jojo: /\bhe?y?\s*(jojo|jo-?jo|jo\s*jo|joe\s*joe|joejoe|jojoe|jojou|joj-?o|choco|jhojho|jyojyo)\b/i
+};
 let wakeWord = 'robot';
 let wakeEnabled = true;
 let wakeBlocked = false;
@@ -3132,13 +3146,26 @@ function bindWake() {
         wakeRestartDelay = 800;
         wakeFlapCount = 0; wakeFlapWindowStart = Date.now();
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const heard = ev.results[i][0].transcript || '';
-            const re = new RegExp('\\bhey\\s+' + wakeWord + '\\b', 'i');
-            if (re.test(heard)) {
-                wakeLanguageOverride = wakeWord === 'jojo' ? 'hi' : 'en';
-                selectedLanguage = wakeLanguageOverride;
+            const heard = (ev.results[i][0].transcript || '').toLowerCase();
+            // Both wake words are always listened for, regardless of the selected default.
+            if (WAKE_PATTERNS.robot.test(heard)) {
+                wakeWord = 'robot';
+                wakeLanguageOverride = 'en';
+                selectedLanguage = 'en';
+                try { localStorage.setItem('milusions-wake-word', 'robot'); } catch (_) {}
+                updateWakeBtn();
                 if (recognition) recognition.lang = speechLang();
-                if (SpeechRecognitionImpl) activateHelio();
+                if (SpeechRecognitionImpl) activateHelio('What?');
+                return;
+            }
+            if (WAKE_PATTERNS.jojo.test(heard)) {
+                wakeWord = 'jojo';
+                wakeLanguageOverride = 'hi';
+                selectedLanguage = 'hi';
+                try { localStorage.setItem('milusions-wake-word', 'jojo'); } catch (_) {}
+                updateWakeBtn();
+                if (recognition) recognition.lang = speechLang();
+                if (SpeechRecognitionImpl) activateHelio('क्या?');
                 return;
             }
         }
