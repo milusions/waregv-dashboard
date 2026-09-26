@@ -671,7 +671,9 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .helio-transcript.show{opacity:1;transform:translateY(0)}
 .helio-transcript-in{font-style:normal;font-weight:500}
 .helio-transcript-out{font-style:italic;font-weight:400;opacity:.82}
-.helio-type-row{position:relative;z-index:4;display:flex;align-items:center;gap:10px;width:min(560px,88%);margin:22px auto 0}
+.helio-io-area{position:relative;z-index:3;flex:1;width:100%;display:flex;align-items:center;justify-content:center}
+.helio-type-row{position:relative;z-index:4;display:none;align-items:center;gap:10px;width:min(560px,88%);margin:0 auto;pointer-events:auto;opacity:0;transform:translateY(4px);transition:opacity .2s ease,transform .2s ease}
+.helio-type-row.show{display:flex;opacity:1;transform:translateY(0)}
 .helio-type-input{flex:1;height:46px;padding:0 16px;border-radius:23px;border:1px solid rgba(0,0,0,.14);background:#fff;color:#12151c;font-size:.92rem;box-shadow:0 4px 16px rgba(0,0,0,.08);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
 .helio-type-input:focus{border-color:var(--primary,#0077ff);box-shadow:0 4px 18px rgba(0,119,255,.22)}
 .helio-type-send{flex:0 0 auto;width:46px;height:46px;border-radius:50%;border:0;background:#0077ff;color:#fff;font-size:1.1rem;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 14px rgba(0,119,255,.35);transition:transform .15s ease,filter .15s ease}

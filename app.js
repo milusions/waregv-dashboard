@@ -2432,6 +2432,7 @@ let outputTranscript = '';
 function setVoiceStatus() {}
 function renderTranscript() {
     const el = document.getElementById('helio-transcript');
+    const typeRow = document.getElementById('helio-type-row');
     if (!el) return;
     const input = [transcriptText, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     el.innerHTML = '';
@@ -2448,6 +2449,14 @@ function renderTranscript() {
         el.appendChild(outLine);
     }
     el.classList.toggle('show', !!(input || outputTranscript));
+
+    // Text override field: only offered while Helio is quietly listening and
+    // no speech has been picked up yet — hidden the moment you start talking
+    // or while Helio itself is thinking/speaking.
+    if (typeRow) {
+        const showType = helioOpen && agentState === 'listening' && !input;
+        typeRow.classList.toggle('show', showType);
+    }
 }
 
 function setFace(state) {
@@ -2831,6 +2840,7 @@ async function handleCommand(text) {
     agentState = 'thinking';
     setVoiceStatus();
     setFace('thinking');
+    renderTranscript();
     startThinkingIndicator();
 
     const reply = await queryHelio(text)
@@ -2849,6 +2859,7 @@ async function handleCommand(text) {
     agentState = 'speaking';
     setVoiceStatus();
     setFace('speaking');
+    renderTranscript();
     await speakText(answer);
     if (!alive()) return;
     resumeListening();
