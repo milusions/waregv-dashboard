@@ -2540,6 +2540,21 @@ function scheduleSilenceCommit() {
     }, SILENCE_COMMIT_MS);
 }
 
+function submitTypedCommand(rawText) {
+    const text = (rawText || '').trim();
+    if (!text || !helioOpen) return;
+    clearVoiceTimers();
+    recognitionStop();
+    transcriptText = text; interimText = '';
+    confidenceSum = 0; confidenceCount = 0;
+    renderTranscript();
+    notifyHelioState('listening_stop', 'thinking', '', '');
+    notifyHelioState('input_received', 'thinking', text, '');
+    appendHistory('you', text);
+    transcriptText = '';
+    handleCommand(text);
+}
+
 function commitTranscript() {
     const text = pendingText();
     if (!text || agentState !== 'listening') return;
@@ -3162,6 +3177,18 @@ document.addEventListener('keydown', (event) => { if (event.key === 'Escape') cl
     updateWakeBtn();
     syncEngine();
     PeekController.start();
+
+    const typeInput = document.getElementById('helio-type-input');
+    const typeSend = document.getElementById('helio-type-send');
+    const sendTyped = () => {
+        if (!typeInput) return;
+        submitTypedCommand(typeInput.value);
+        typeInput.value = '';
+    };
+    if (typeSend) typeSend.addEventListener('click', sendTyped);
+    if (typeInput) typeInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); sendTyped(); }
+    });
 
     requestAnimationFrame(frame);
 })();
