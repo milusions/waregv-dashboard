@@ -1,9 +1,8 @@
 // =====================================================================
 //  Milusions WareGV Suite - dashboard logic
 //  UI (index.html / style.css) + live rover integration:
-//    - rosbridge  (/map /odom /tf /cmd_vel /plan /wheel_states, publishes /cmd_vel_joy)
+//    - rosbridge  (/map /odom /tf /cmd_vel /plan, publishes /cmd_vel_joy)
 //    - REST API   (navigation, initial pose, waypoints, abort, mode, save map)
-//    - WebRTC     (RealSense RGB + Depth, camera_webrtc_streamer.py)
 //    - Helio      (continuous voice assistant, wake word, local command engine)
 //
 //  All service endpoints use the authenticated rover host. The dashboard
@@ -38,13 +37,12 @@ function readAuthenticatedRoverHost() {
 
 const ROVER_IP = readAuthenticatedRoverHost();
 if (!ROVER_IP) {
-    window.location.replace('index.html');
+    window.location.replace('login.html');
     throw new Error('Rover session is missing or expired. Redirecting to login.');
 }
 
 const REST_API_BASE = `http://${ROVER_IP}:8000`;
 const ROSBRIDGE_WS_URL = `ws://${ROVER_IP}:9090`;
-const WEBRTC_SIGNAL_URL = `http://${ROVER_IP}:8081`;
 const HELIO_WS_URL = `ws://${ROVER_IP}:8001/ws/helio`;
 
 const CFG = {
@@ -61,7 +59,6 @@ const TOPICS = {
     odom: '/odom',
     cmdVel: '/cmd_vel',
     plan: '/plan',
-    wheel: '/wheel_states',
     jointStates: '/joint_states',
     localCostmap: '/local_costmap/costmap',
     globalCostmap: '/global_costmap/costmap',
@@ -619,126 +616,6 @@ async function postJSON(urlPath, body = {}) {
     }
     return data;
 }
-
-// =====================================================================
-//  REALSENSE WEBRTC VIDEO
-// =====================================================================
-const WEBRTC_CFG = { signalUrl: WEBRTC_SIGNAL_URL, baseRetryMs: 1500, maxRetryMs: 8000 };
-
-const webrtcStreams = {
-    rgb: {
-        video: document.getElementById('rgb-video'),
-        empty: document.getElementById('rgb-video-empty'),
-        state: document.getElementById('rgb-webrtc-state'),
-        panel: document.getElementById('rgb-video') && document.getElementById('rgb-video').closest('.video-panel'),
-        endpoint: '/offer/color', pc: null, retry: null, tries: 0
-    },
-    depth: {
-        video: document.getElementById('depth-video'),
-        empty: document.getElementById('depth-video-empty'),
-        state: document.getElementById('depth-webrtc-state'),
-        panel: document.getElementById('depth-video') && document.getElementById('depth-video').closest('.video-panel'),
-        endpoint: '/offer/depth', pc: null, retry: null, tries: 0
-    }
-};
-
-function setWebRTCState(s, live, label) {
-    if (!s.state) return;
-    s.state.textContent = label || (live ? 'LIVE' : 'OFFLINE');
-    s.state.classList.toggle('live', !!live);
-    if (s.panel) s.panel.classList.toggle('live', !!live);
-}
-
-function waitIceGathering(pc, ms) {
-    return new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') return resolve();
-        let t = null;
-        const done = () => { clearTimeout(t); pc.removeEventListener('icegatheringstatechange', check); resolve(); };
-        const check = () => { if (pc.iceGatheringState === 'complete') done(); };
-        pc.addEventListener('icegatheringstatechange', check);
-        t = setTimeout(done, ms);
-    });
-}
-
-function scheduleWebRTCRetry(kind) {
-    const s = webrtcStreams[kind];
-    if (s.retry) clearTimeout(s.retry);
-    s.tries += 1;
-    const delay = Math.min(WEBRTC_CFG.baseRetryMs * Math.pow(1.5, s.tries - 1), WEBRTC_CFG.maxRetryMs);
-    s.retry = setTimeout(() => startWebRTCStream(kind), delay);
-}
-
-async function startWebRTCStream(kind) {
-    const s = webrtcStreams[kind];
-    if (!s || !s.video || typeof RTCPeerConnection === 'undefined') return;
-    if (s.retry) { clearTimeout(s.retry); s.retry = null; }
-    if (s.pc) { try { s.pc.close(); } catch (_) {} s.pc = null; }
-    setWebRTCState(s, false, 'CONNECTING');
-
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    s.pc = pc;
-    pc.addTransceiver('video', { direction: 'recvonly' });
-
-    pc.ontrack = (event) => {
-        const stream = (event.streams && event.streams[0]) || new MediaStream([event.track]);
-        s.video.srcObject = stream;
-        const p = s.video.play();
-        if (p && p.catch) p.catch(() => {});
-        s.tries = 0;
-        setWebRTCState(s, true, 'LIVE');
-    };
-    pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        if (s.pc !== pc) return;
-        if (state === 'connected') { s.tries = 0; setWebRTCState(s, true, 'LIVE'); }
-        if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-            setWebRTCState(s, false, state.toUpperCase());
-            try { pc.close(); } catch (_) {}
-            s.pc = null;
-            scheduleWebRTCRetry(kind);
-        }
-    };
-
-    try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await waitIceGathering(pc, 1500);
-        const response = await fetch(WEBRTC_CFG.signalUrl + s.endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
-        });
-        if (!response.ok) throw new Error('WebRTC signaling HTTP ' + response.status);
-        await pc.setRemoteDescription(await response.json());
-    } catch (err) {
-        if (s.tries < 2) console.warn('[WebRTC:' + kind + ']', err.message || err);
-        setWebRTCState(s, false, 'RETRYING');
-        try { pc.close(); } catch (_) {}
-        if (s.pc === pc) s.pc = null;
-        scheduleWebRTCRetry(kind);
-    }
-}
-
-function stopWebRTCStream(kind) {
-    const s = webrtcStreams[kind];
-    if (!s) return;
-    if (s.retry) clearTimeout(s.retry);
-    s.retry = null;
-    if (s.pc) { try { s.pc.close(); } catch (_) {} }
-    s.pc = null;
-    if (s.video) s.video.srcObject = null;
-    setWebRTCState(s, false, 'OFFLINE');
-}
-
-function startRealSenseWebRTC() {
-    startWebRTCStream('rgb');
-    startWebRTCStream('depth');
-}
-
-window.addEventListener('beforeunload', () => {
-    stopWebRTCStream('rgb');
-    stopWebRTCStream('depth');
-});
 
 // =====================================================================
 //  SLAM map canvas & interaction
@@ -3195,7 +3072,6 @@ function bindWake() {
     renderMode();
 
     initROSBridge();
-    startRealSenseWebRTC();
 
     fetchMode().then(m => { if (m && !pending) setCurrentMode(m); });
     setInterval(async () => {
