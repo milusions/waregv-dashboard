@@ -1059,12 +1059,12 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     padding: 12px;
 }
 
-/* Ask Helio is a true 1:1 square panel. */
-.col-ctrl .waergv-panel {
+/* Ask Helio fits its content only. */
+.col-ctrl .waergv-panel,
+.side .waergv-panel {
     flex: 0 0 auto;
     width: 100%;
     height: auto;
-    aspect-ratio: 1 / 1;
     min-height: 0;
 }
 
@@ -1162,12 +1162,11 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     overflow: hidden !important;
 }
 
-/* 1st: Ask Helio — true square panel. */
-.col-ctrl > .waergv-panel {
-    order: 1 !important;
+/* Ask Helio — fits content only, no forced square. */
+.side > .waergv-panel {
+    order: 2 !important;
     flex: 0 0 auto !important;
     width: 100% !important;
-    aspect-ratio: 1 / 1 !important;
     height: auto !important;
     min-height: 0 !important;
 }
