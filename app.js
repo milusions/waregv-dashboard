@@ -2497,8 +2497,11 @@ function stopThinkingIndicator() {
     notifyHelioState('thinking_stop', 'idle', '', '');
 }
 
+function desiredListening() {
+    return helioOpen ? (agentState === 'listening') : (wakeEnabled && !wakeBlocked);
+}
 function recognitionStart() {
-    if (!recognition || !helioOpen || agentState !== 'listening') return;
+    if (!recognition || !desiredListening()) return;
     try { recognition.start(); }
     catch (_) { recognitionRestartTimer = setTimeout(() => recognitionStart(), 180); }
 }
@@ -2506,9 +2509,12 @@ function recognitionStop() {
     try { recognition && recognition.abort(); } catch (_) {}
 }
 function scheduleRecognitionRestart() {
-    if (!helioOpen || agentState !== 'listening') return;
+    if (!desiredListening()) return;
     if (recognitionRestartTimer) clearTimeout(recognitionRestartTimer);
     recognitionRestartTimer = setTimeout(() => { recognitionRestartTimer = null; recognitionStart(); }, recognitionRestartDelay);
+}
+function syncEngine() {
+    if (desiredListening()) recognitionStart(); else recognitionStop();
 }
 
 function pendingText() {
@@ -2556,10 +2562,10 @@ function bindRecognition() {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 3;
-    recognition.lang = speechLang();
+    recognition.lang = BASE_SPEECH_LANG;
 
     recognition.onstart = () => {
-        if (!helioOpen) return;
+        if (!helioOpen) return; // wake mode: listening silently, no UI change
         agentState = 'listening';
         speechActive = true;
         notifyHelioState('listening_start', 'listening', '', '');
@@ -2568,9 +2574,21 @@ function bindRecognition() {
     };
 
     recognition.onresult = (event) => {
-        if (!helioOpen || agentState !== 'listening') return;
         recognitionRestartDelay = 400;
         recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
+
+        if (!helioOpen) {
+            // WAKE MODE: same engine, just checking for either wake word.
+            for (let i = event.resultIndex; i < event.results.length; i += 1) {
+                const heard = ((event.results[i][0] && event.results[i][0].transcript) || '').toLowerCase();
+                if (!heard) continue;
+                if (WAKE_PATTERNS.robot.test(heard)) { triggerWake('robot'); return; }
+                if (WAKE_PATTERNS.jojo.test(heard)) { triggerWake('jojo'); return; }
+            }
+            return;
+        }
+
+        if (agentState !== 'listening') return;
         let currentInterim = '';
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
             const result = event.results[i];
@@ -2596,13 +2614,17 @@ function bindRecognition() {
     };
 
     recognition.onerror = (event) => {
-        if (!helioOpen) return;
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed' || event.error === 'audio-capture') {
-            agentState = 'idle';
-            speechActive = false;
-            setVoiceStatus('MICROPHONE UNAVAILABLE');
-            setFace('listening');
-            setTeleprompter('Microphone permission is required (use https or localhost).', 'helio');
+            if (helioOpen) {
+                agentState = 'idle';
+                speechActive = false;
+                setVoiceStatus('MICROPHONE UNAVAILABLE');
+                setFace('listening');
+                setTeleprompter('Microphone permission is required (allow mic access and tap Ask Helio again).', 'helio');
+            } else {
+                wakeBlocked = true;
+                updateWakeBtn();
+            }
             return;
         }
         if (event.error === 'network') {
@@ -2612,12 +2634,12 @@ function bindRecognition() {
                 notify('ERROR', 'Speech recognition needs an internet connection.');
             }
         }
-        setVoiceStatus('LISTENING CONTINUOUSLY', true);
+        if (helioOpen) setVoiceStatus('LISTENING CONTINUOUSLY', true);
     };
 
     recognition.onend = () => {
         speechActive = false;
-        if (!helioOpen || agentState !== 'listening') return;
+        if (!desiredListening()) return;
 
         const now = Date.now();
         if (now - recognitionFlapWindowStart > RECOGNITION_FLAP_WINDOW_MS) { recognitionFlapWindowStart = now; recognitionFlapCount = 0; }
@@ -2625,7 +2647,7 @@ function bindRecognition() {
         if (recognitionFlapCount > RECOGNITION_FLAP_LIMIT) {
             if (!recognitionCoolingDown) {
                 recognitionCoolingDown = true;
-                setVoiceStatus('STABILIZING MICROPHONE...');
+                if (helioOpen) setVoiceStatus('STABILIZING MICROPHONE...');
             }
             recognitionRestartTimer = setTimeout(() => {
                 recognitionRestartTimer = null; recognitionCoolingDown = false;
@@ -2636,6 +2658,15 @@ function bindRecognition() {
         }
         scheduleRecognitionRestart();
     };
+}
+
+function triggerWake(key) {
+    wakeWord = key;
+    wakeLanguageOverride = key === 'jojo' ? 'hi' : 'en';
+    selectedLanguage = wakeLanguageOverride;
+    try { localStorage.setItem('milusions-wake-word', key); } catch (_) {}
+    updateWakeBtn();
+    activateHelio(key === 'jojo' ? 'क्या?' : 'What?');
 }
 
 function resumeListening() {
@@ -2660,7 +2691,7 @@ function openVoiceModal() {
 }
 
 function activateHelio(greeting) {
-    stopWake();
+    recognitionStop();
     helioOpen = true;
     notifyHelioState('helio_on', 'waking', '', 'helio_wake');
     
@@ -2704,8 +2735,9 @@ function closeVoiceModal() {
     if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
     transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
     renderTranscript();
+    if (recognition) recognition.lang = BASE_SPEECH_LANG;
     PeekController.start();
-    syncWake();
+    syncEngine();
 }
 
 function cleanForSpeech(t) {
@@ -3030,9 +3062,6 @@ const WAKE_PATTERNS = {
 let wakeWord = 'robot';
 let wakeEnabled = true;
 let wakeBlocked = false;
-let wakeRec = null, wakeRunning = false, wakeWanted = false, wakeRestartTimer = null, wakeRestartDelay = 800;
-let wakeFlapCount = 0, wakeFlapWindowStart = 0, wakeCoolingDown = false;
-const WAKE_FLAP_LIMIT = 6, WAKE_FLAP_WINDOW_MS = 10000, WAKE_COOLDOWN_MS = 8000;
 try {
     const savedWord = localStorage.getItem('milusions-wake-word');
     const savedState = localStorage.getItem('milusions-wake');
@@ -3081,7 +3110,7 @@ function updateWakeBtn() {
         btn.title = wakeBlocked ? 'Microphone blocked - wake word unavailable' : 'Wake word settings';
     }
     renderWakeMenu();
-    syncWake();
+    syncEngine();
 }
 function toggleWakeMenu(event) {
     if (event) event.stopPropagation();
@@ -3104,90 +3133,6 @@ function toggleWake() {
 }
 document.addEventListener('click', (event) => { if (!event.target.closest('.wake-menu-wrap')) closeWakeMenu(); });
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeWakeMenu(); });
-
-function syncWake() {
-    const should = wakeEnabled && !wakeBlocked && !!wakeRec && !helioOpen;
-    if (should) startWake(); else stopWake();
-}
-function startWake() {
-    wakeWanted = true;
-    if (wakeRunning || !wakeRec) return;
-    try { wakeRec.start(); } catch (_) {}
-}
-function stopWake() {
-    wakeWanted = false;
-    if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-    if (wakeRunning && wakeRec) { try { wakeRec.abort(); } catch (_) {} }
-}
-function bindWake() {
-    if (!SpeechRecognitionImpl) return;
-    wakeRec = new SpeechRecognitionImpl();
-    wakeRec.continuous = true;
-    wakeRec.interimResults = true;
-    wakeRec.lang = BASE_SPEECH_LANG;
-    wakeRec.onstart = () => { wakeRunning = true; };
-    wakeRec.onend = () => {
-        wakeRunning = false;
-        if (!wakeWanted || wakeBlocked || helioOpen) return;
-
-        // The browser's continuous mode naturally ends every so often even
-        // with nothing wrong; restarting too eagerly makes the mic indicator
-        // rapidly flicker on/off. Track how often that happens and, if it's
-        // flapping, back off for a stable cooldown instead of retrying instantly.
-        const now = Date.now();
-        if (now - wakeFlapWindowStart > WAKE_FLAP_WINDOW_MS) { wakeFlapWindowStart = now; wakeFlapCount = 0; }
-        wakeFlapCount++;
-        if (wakeFlapCount > WAKE_FLAP_LIMIT) {
-            if (!wakeCoolingDown) {
-                wakeCoolingDown = true;
-                notify('WARNING', 'Wake mic was cycling too fast, stabilizing it - listening will resume shortly.');
-            }
-            wakeRestartTimer = setTimeout(() => {
-                wakeRestartTimer = null; wakeCoolingDown = false; wakeFlapCount = 0; wakeFlapWindowStart = Date.now();
-                if (wakeWanted) startWake();
-            }, WAKE_COOLDOWN_MS);
-            return;
-        }
-        wakeRestartTimer = setTimeout(() => { wakeRestartTimer = null; if (wakeWanted) startWake(); }, wakeRestartDelay);
-    };
-    wakeRec.onerror = (e) => {
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-            wakeBlocked = true;
-            notify('WARNING', 'Microphone access is blocked, so the wake word is off.');
-            updateWakeBtn();
-        } else if (e.error === 'network') {
-            wakeRestartDelay = 5000;
-        }
-    };
-    wakeRec.onresult = (ev) => {
-        wakeRestartDelay = 800;
-        wakeFlapCount = 0; wakeFlapWindowStart = Date.now();
-        for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const heard = (ev.results[i][0].transcript || '').toLowerCase();
-            // Both wake words are always listened for, regardless of the selected default.
-            if (WAKE_PATTERNS.robot.test(heard)) {
-                wakeWord = 'robot';
-                wakeLanguageOverride = 'en';
-                selectedLanguage = 'en';
-                try { localStorage.setItem('milusions-wake-word', 'robot'); } catch (_) {}
-                updateWakeBtn();
-                if (recognition) recognition.lang = speechLang();
-                if (SpeechRecognitionImpl) activateHelio('What?');
-                return;
-            }
-            if (WAKE_PATTERNS.jojo.test(heard)) {
-                wakeWord = 'jojo';
-                wakeLanguageOverride = 'hi';
-                selectedLanguage = 'hi';
-                try { localStorage.setItem('milusions-wake-word', 'jojo'); } catch (_) {}
-                updateWakeBtn();
-                if (recognition) recognition.lang = speechLang();
-                if (SpeechRecognitionImpl) activateHelio('क्या?');
-                return;
-            }
-        }
-    };
-}
 
 (function init() {
     let saved = null;
@@ -3214,8 +3159,8 @@ function bindWake() {
     }, 8000);
 
     bindRecognition();
-    bindWake();
     updateWakeBtn();
+    syncEngine();
     PeekController.start();
 
     requestAnimationFrame(frame);
