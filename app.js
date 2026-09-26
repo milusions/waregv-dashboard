@@ -1,7 +1,7 @@
 // =====================================================================
 //  Milusions WareGV Suite - dashboard logic
 //  UI (index.html / style.css) + live rover integration:
-//    - rosbridge  (/map /odom /tf /cmd_vel /plan /wheel_states, publishes /joy)
+//    - rosbridge  (/map /odom /tf /cmd_vel /plan /wheel_states, publishes /cmd_vel_joy)
 //    - REST API   (navigation, initial pose, waypoints, abort, mode, save map)
 //    - WebRTC     (RealSense RGB + Depth, camera_webrtc_streamer.py)
 //    - Helio      (continuous voice assistant, wake word, local command engine)
@@ -65,9 +65,12 @@ const TOPICS = {
     jointStates: '/joint_states',
     localCostmap: '/local_costmap/costmap',
     globalCostmap: '/global_costmap/costmap',
-    joy: '/joy',
+    joy: '/cmd_vel_joy',
     tf: '/tf',
-    tfStatic: '/tf_static'
+    tfStatic: '/tf_static',
+    nav2Status: '/navigate_to_pose/_action/status',
+    btLog: '/behavior_tree_log',
+    rosout: '/rosout'
 };
 
 // --- Layer visibility, driven by the map legend checkboxes ---
@@ -186,10 +189,107 @@ window.toggleDocumentFullscreen = toggleDocumentFullscreen;
 let mapImageDirty = false, needsDraw = true;
 let latestMap = null;
 let latestPlan = [];
-let navStatus = 'Idle';            // Idle | Planning | Navigating | Reached | Aborted
+let navStatus = 'Idle';            // Idle | Planning | Navigating | Recovering | Reached | Aborted | Failed
 let missionGoal = null;            // {x, y} final goal of the running mission
 let ignorePlansUntil = 0;
 let distanceRemaining = null;
+
+// --- Nav2 fine-grained state (from real Nav2 topics, not guessed) ---
+// GoalStatus codes per action_msgs/msg/GoalStatus.
+const NAV2_GOAL_STATUS_NAMES = {
+    0: 'UNKNOWN', 1: 'ACCEPTED', 2: 'EXECUTING', 3: 'CANCELING',
+    4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'
+};
+let nav2GoalStatusCode = null;     // last GoalStatus string, e.g. 'EXECUTING'
+let nav2ActiveNode = null;         // last BT leaf/control node reported RUNNING
+let nav2Stage = null;              // human label shown in the map tag, e.g. 'Recovery: Spin'
+let nav2StatusMsgAt = 0;           // last time we heard a *real* Nav2 status/BT message
+let nav2LastError = null;          // { text, node, level, ts } - most recent rosout WARN/ERROR from a nav2 node
+const NAV2_STATUS_FRESH_MS = 4000; // how long a real Nav2 signal is considered authoritative
+const NAV2_ERROR_BUBBLE_MS = 12000; // how long the chat-bubble stays up after an error
+const NAV2_NODE_RE = /bt_navigator|controller_server|planner_server|recoveries_server|behavior_server|waypoint_follower|smoother_server|velocity_smoother|collision_monitor|costmap/i;
+const NAV2_RECOVERY_NODE_RE = /recover|spin|back ?up|wait|clear ?costmap|assisted_teleop/i;
+const NAV2_PLAN_NODE_RE = /computepathtopose|compute_path|planner|smoothpath|smooth_path/i;
+
+function nav2StatusFresh() { return Date.now() - nav2StatusMsgAt < NAV2_STATUS_FRESH_MS; }
+
+// Turns a BT node name like "RecoveryNode" / "Spin" / "ComputePathToPose" into
+// something readable to sit next to the location arrow.
+function nav2StageLabel(nodeName) {
+    if (!nodeName) return null;
+    if (NAV2_RECOVERY_NODE_RE.test(nodeName)) return 'Recovering: ' + nodeName;
+    if (NAV2_PLAN_NODE_RE.test(nodeName)) return 'Planning path';
+    if (/followpath|follow_path/i.test(nodeName)) return 'Following path';
+    return nodeName;
+}
+
+// Reconciles the last GoalStatus + last active BT node into the single
+// navStatus the rest of the UI reads, and the human-readable stage tag.
+function applyNav2Status() {
+    const isRecovery = nav2ActiveNode && NAV2_RECOVERY_NODE_RE.test(nav2ActiveNode);
+    nav2Stage = nav2StageLabel(nav2ActiveNode) || (nav2GoalStatusCode ? nav2GoalStatusCode : null);
+    switch (nav2GoalStatusCode) {
+        case 'ACCEPTED':
+        case 'EXECUTING':
+            navStatus = isRecovery ? 'Recovering' : (nav2ActiveNode && NAV2_PLAN_NODE_RE.test(nav2ActiveNode) ? 'Planning' : 'Navigating');
+            break;
+        case 'SUCCEEDED':
+            if (navStatus !== 'Reached') {
+                navStatus = 'Reached'; missionGoal = null; latestPlan = [];
+                ignorePlansUntil = Date.now() + 1500; clearNavLoading();
+                notify('INFO', 'Navigation destination reached.');
+            }
+            nav2Stage = 'Reached';
+            break;
+        case 'ABORTED':
+            if (navStatus !== 'Aborted') {
+                navStatus = 'Aborted'; missionGoal = null; clearNavLoading();
+                notify('ERROR', 'Nav2 aborted the mission' + (nav2LastError ? ': ' + nav2LastError.text : '.'));
+            }
+            nav2Stage = 'Aborted' + (nav2LastError ? ': ' + nav2LastError.text : '');
+            break;
+        case 'CANCELED':
+            navStatus = 'Idle'; missionGoal = null; clearNavLoading();
+            nav2Stage = 'Canceled';
+            break;
+        default:
+            break;
+    }
+    needsDraw = true;
+}
+
+// rosout Log levels (rcl_interfaces/msg/Log).
+const ROSOUT_WARN = 30, ROSOUT_ERROR = 40, ROSOUT_FATAL = 50;
+function onRosoutMsg(msg) {
+    if (!msg || msg.level < ROSOUT_WARN) return;
+    if (!NAV2_NODE_RE.test(msg.name || '')) return;
+    nav2LastError = { text: msg.msg, node: msg.name, level: msg.level, ts: Date.now() };
+    nav2StatusMsgAt = Date.now();
+    needsDraw = true;
+    if (msg.level >= ROSOUT_ERROR) notify('ERROR', '[' + msg.name + '] ' + msg.msg);
+}
+
+function onBTLogMsg(msg) {
+    const events = (msg && msg.event_log) || [];
+    let changed = false;
+    events.forEach((e) => {
+        if (e.current_status === 'RUNNING') { nav2ActiveNode = e.node_name; changed = true; }
+    });
+    if (!changed) return;
+    nav2StatusMsgAt = Date.now();
+    applyNav2Status();
+}
+
+function onNav2GoalStatusMsg(msg) {
+    const list = (msg && msg.status_list) || [];
+    if (!list.length) return;
+    const last = list[list.length - 1];
+    const code = NAV2_GOAL_STATUS_NAMES[last.status] || null;
+    if (!code) return;
+    nav2GoalStatusCode = code;
+    nav2StatusMsgAt = Date.now();
+    applyNav2Status();
+}
 const mapCanvasOff = document.createElement('canvas');
 let odom = null;                   // {speed}
 let odomPose = null;               // pose straight from /odom (odom frame)
@@ -229,6 +329,9 @@ function startNavWatchdog() {
     navInitTimeout = setTimeout(async () => {
         navInitTimeout = null;
         clearNavLoading();
+        if (nav2StatusFresh() && (nav2GoalStatusCode === 'EXECUTING' || nav2GoalStatusCode === 'ACCEPTED')) {
+            return; // Nav2 itself says the goal is still live - trust it over the /plan heuristic.
+        }
         navStatus = 'Aborted';
         missionGoal = null;
         latestPlan = [];
@@ -238,10 +341,6 @@ function startNavWatchdog() {
         notify('ERROR', 'Nav2 did not produce a path within ' + (CFG.planTimeoutMs / 1000) + ' s. Mission aborted.');
     }, CFG.planTimeoutMs);
 }
-
-const wheelIds = ['fl', 'fr', 'bl', 'br'];
-const series = {};
-wheelIds.forEach(id => series[id] = { a: [], c: [] });
 
 function formatSigned(v, digits = 2) {
     const n = Number(v);
@@ -328,64 +427,6 @@ function refreshRobotPose() {
     if (p) robot = p;
     else if (odomPose) robot = odomPose;
     needsDraw = true;
-}
-
-// ----- wheel telemetry: accepts {id,a,c}, [{...}], or {fl:{a,c},...} -----
-function ingestWheel(d, now) {
-    if (!d) return;
-    const id = String(d.id || '').toLowerCase();
-    const s = series[id];
-    if (!s) return;
-    const a = Number(d.a !== undefined ? d.a : d.actual);
-    const c = Number(d.c !== undefined ? d.c : (d.cmd !== undefined ? d.cmd : d.command));
-    if (Number.isFinite(a)) s.a.push({ t: now, v: a });
-    if (Number.isFinite(c)) s.c.push({ t: now, v: c });
-    const cutoff = now - CFG.chartWindowSec - 2;
-    // keep one point older than the window so a step line stays anchored
-    while (s.a.length > 1 && s.a[1].t < cutoff) s.a.shift();
-    while (s.c.length > 1 && s.c[1].t < cutoff) s.c.shift();
-}
-function onWheelStates(msg) {
-    let data;
-    try { data = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data; } catch (e) { return; }
-    const now = performance.now() / 1000;
-    if (Array.isArray(data)) data.forEach(d => ingestWheel(d, now));
-    else if (data && Array.isArray(data.wheels)) data.wheels.forEach(d => ingestWheel(d, now));
-    else if (data && data.id) ingestWheel(data, now);
-    else if (data && typeof data === 'object') {
-        wheelIds.forEach(id => { if (data[id]) ingestWheel(Object.assign({ id }, data[id]), now); });
-    }
-}
-
-// ----- /joint_states (sensor_msgs/JointState): the real source of wheel motor data -----
-function matchWheelIdFromJointName(name) {
-    const n = String(name || '').toLowerCase();
-    const isFront = /front|\bfl\b|\bfr\b|_f_|^f_|_f$/.test(n) && !/rear|back/.test(n);
-    const isRear = /rear|back|\bbl\b|\bbr\b|_r_|^r_|_r$/.test(n) && !/front/.test(n);
-    const isLeft = /left|\bfl\b|\bbl\b|_l_|^l_|_l$/.test(n) && !/right/.test(n);
-    const isRight = /right|\bfr\b|\bbr\b|_r_(?!ear)|^r_(?!ear)|_r$/.test(n) && !/left/.test(n);
-
-    if (/\bfl\b/.test(n) || (isFront && isLeft)) return 'fl';
-    if (/\bfr\b/.test(n) || (isFront && isRight)) return 'fr';
-    if (/\bbl\b/.test(n) || (isRear && isLeft)) return 'bl';
-    if (/\bbr\b/.test(n) || (isRear && isRight)) return 'br';
-    return null;
-}
-
-function onJointStates(msg) {
-    const names = msg.name || [];
-    const vel = msg.velocity || [];
-    const pos = msg.position || [];
-    if (!names.length) return;
-    const now = performance.now() / 1000;
-    names.forEach((name, idx) => {
-        const id = matchWheelIdFromJointName(name);
-        if (!id) return;
-        const v = vel.length ? Number(vel[idx]) : NaN;
-        const p = pos.length ? Number(pos[idx]) : NaN;
-        const value = Number.isFinite(v) ? v : p;
-        if (Number.isFinite(value)) ingestWheel({ id, a: value }, now);
-    });
 }
 
 // ----- Local / global costmaps (nav_msgs/OccupancyGrid), rendered as toggleable overlays with Foxglove-style colormap -----
@@ -508,12 +549,13 @@ function subscribeAllTopics() {
         needsDraw = true;
     }, { queue_length: 1 });
     rosSubscribe(TOPICS.plan, 'nav_msgs/Path', onPlanMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.wheel, 'std_msgs/String', onWheelStates);
-    rosSubscribe(TOPICS.jointStates, 'sensor_msgs/JointState', onJointStates, { queue_length: 1 });
     rosSubscribe(TOPICS.localCostmap, 'nav_msgs/OccupancyGrid', onLocalCostmapMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.globalCostmap, 'nav_msgs/OccupancyGrid', onGlobalCostmapMsg, { queue_length: 1 });
+    rosSubscribe(TOPICS.nav2Status, 'action_msgs/GoalStatusArray', onNav2GoalStatusMsg, { queue_length: 1 });
+    rosSubscribe(TOPICS.btLog, 'nav2_msgs/BehaviorTreeLog', onBTLogMsg, { queue_length: 5 });
+    rosSubscribe(TOPICS.rosout, 'rcl_interfaces/Log', onRosoutMsg, { queue_length: 10 });
 
-    joyTopic = new ROSLIB.Topic({ ros, name: TOPICS.joy, messageType: 'sensor_msgs/Joy' });
+    joyTopic = new ROSLIB.Topic({ ros, name: TOPICS.joy, messageType: 'geometry_msgs/Twist' });
     joyTopic.advertise();
 }
 
@@ -697,90 +739,6 @@ window.addEventListener('beforeunload', () => {
     stopWebRTCStream('rgb');
     stopWebRTCStream('depth');
 });
-
-// =====================================================================
-//  Wheel graphs
-// =====================================================================
-const chartCanvases = {};
-wheelIds.forEach(id => chartCanvases[id] = document.getElementById('chart-' + id));
-
-function fitCanvas(canvas) {
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-        canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { ctx, w, h };
-}
-
-function drawChart(id) {
-    const { ctx, w, h } = fitCanvas(chartCanvases[id]);
-    if (!w || !h) return;
-    ctx.clearRect(0, 0, w, h);
-    const now = performance.now() / 1000, win = CFG.chartWindowSec, t0 = now - win;
-    const L = 46, R = 10, T = 10, B = 20;
-    const pw = w - L - R, ph = h - T - B;
-    const A = series[id].a.filter(p => p.t >= t0 - 1), C = series[id].c;
-
-    let lo = Infinity, hi = -Infinity;
-    const scan = p => { if (p.t >= t0 - 1) { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); } };
-    A.forEach(scan); C.forEach(scan);
-    if (!isFinite(lo)) { lo = -1; hi = 1; }
-    if (hi - lo < 0.2) { const mid = (hi + lo) / 2; lo = mid - 0.1; hi = mid + 0.1; }
-    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
-
-    const X = t => L + ((t - t0) / win) * pw;
-    const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
-
-    ctx.font = '400 10px Roboto, sans-serif';
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = theme['--border']; ctx.fillStyle = theme['--muted'];
-    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    for (let i = 0; i <= 4; i++) {
-        const v = lo + (hi - lo) * (i / 4), y = Math.round(Y(v)) + 0.5;
-        ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
-        ctx.fillText(v.toFixed(2), L - 6, y);
-    }
-    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    for (let s = 0; s <= win; s += 10) {
-        const x = Math.round(X(t0 + s)) + 0.5;
-        ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
-        ctx.fillText(s === win ? 'now' : '-' + (win - s) + 's', x, T + ph + 4);
-    }
-    if (lo < 0 && hi > 0) {
-        ctx.strokeStyle = theme['--muted']; ctx.globalAlpha = 0.6;
-        const y0 = Math.round(Y(0)) + 0.5;
-        ctx.beginPath(); ctx.moveTo(L, y0); ctx.lineTo(w - R, y0); ctx.stroke(); ctx.globalAlpha = 1;
-    }
-
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, pw, ph); ctx.clip();
-    if (C.length) {
-        ctx.strokeStyle = theme['--series-b']; ctx.lineWidth = 1.6; ctx.setLineDash([5, 3]);
-        ctx.beginPath();
-        let started = false, prevY = 0;
-        C.forEach(p => {
-            const x = X(p.t), y = Y(p.v);
-            if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, prevY); ctx.lineTo(x, y); }
-            prevY = y;
-        });
-        ctx.lineTo(X(now), prevY); ctx.stroke(); ctx.setLineDash([]);
-    }
-    if (A.length) {
-        ctx.strokeStyle = theme['--series-a']; ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        A.forEach((p, i) => { const x = X(p.t), y = Y(p.v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-        ctx.stroke();
-    }
-    ctx.restore();
-
-    const la = A.length ? A[A.length - 1].v : null, lc = C.length ? C[C.length - 1].v : null;
-    document.getElementById('lg-' + id + '-a').textContent = formatSigned(la);
-    document.getElementById('lg-' + id + '-c').textContent = formatSigned(lc);
-}
-setInterval(() => wheelIds.forEach(drawChart), 100);
 
 // =====================================================================
 //  SLAM map canvas & interaction
@@ -1180,7 +1138,116 @@ function drawMap() {
             ctx.restore();
         }
         ctx.restore();
+
+        drawNav2StageTag(ctx, p[0], p[1], r);
+        drawNav2ErrorBubble(ctx, p[0], p[1], r);
     }
+}
+
+// Small pill tag next to the location arrow with the live Nav2 stage
+// (e.g. "Navigating", "Recovering: Spin", "Aborted"). Drawn upright,
+// independent of the robot's heading rotation.
+function drawNav2StageTag(ctx, x, y, r) {
+    const label = nav2Stage || navStatus;
+    if (!label || label === 'Idle') return;
+    const tagCol = {
+        Navigating: '#38bdf8', Planning: '#facc15', Recovering: '#fb923c',
+        Reached: '#30a46c', Aborted: '#e5484d', Failed: '#e5484d', Canceled: '#94a3b8'
+    };
+    const key = Object.keys(tagCol).find((k) => label.startsWith(k)) || navStatus;
+    const color = tagCol[key] || '#94a3b8';
+
+    ctx.save();
+    ctx.font = '700 10px Roboto, sans-serif';
+    const textW = ctx.measureText(label).width;
+    const padX = 6, padY = 3, boxW = textW + padX * 2, boxH = 15;
+    const tx = x + r * 2 + 4, ty = y - boxH / 2;
+
+    ctx.fillStyle = 'rgba(15,17,20,.88)';
+    ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+    roundRectPath(ctx, tx, ty, boxW, boxH, 6);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, tx + padX, ty + boxH / 2 + 0.5);
+    ctx.restore();
+}
+
+// Speech-bubble showing the exact terminal error/warning text from the
+// last relevant Nav2 node (bt_navigator, controller_server, etc.), sourced
+// from /rosout, anchored above the robot arrow while it's still fresh.
+function drawNav2ErrorBubble(ctx, x, y, r) {
+    if (!nav2LastError) return;
+    const age = Date.now() - nav2LastError.ts;
+    if (age > NAV2_ERROR_BUBBLE_MS) return;
+
+    const maxCharsPerLine = 34;
+    const raw = String(nav2LastError.text || '').trim();
+    const lines = wrapText(raw, maxCharsPerLine).slice(0, 4);
+    const header = '⚠ ' + nav2LastError.node;
+
+    ctx.save();
+    ctx.font = '700 10px Roboto, sans-serif';
+    const headerW = ctx.measureText(header).width;
+    ctx.font = '400 10px Roboto, sans-serif';
+    const lineW = Math.max(...lines.map((l) => ctx.measureText(l).width), 0);
+    const boxW = Math.min(260, Math.max(headerW, lineW) + 20);
+    const lineH = 13;
+    const boxH = 20 + lines.length * lineH;
+    const bx = x - boxW / 2, by = y - r * 2 - boxH - 14;
+
+    // Fade out over the last 2s of its lifetime.
+    const alpha = age > NAV2_ERROR_BUBBLE_MS - 2000 ? Math.max(0, (NAV2_ERROR_BUBBLE_MS - age) / 2000) : 1;
+    ctx.globalAlpha = alpha;
+
+    ctx.fillStyle = 'rgba(40,14,16,.95)';
+    ctx.strokeStyle = '#e5484d'; ctx.lineWidth = 1.3;
+    roundRectPath(ctx, bx, by, boxW, boxH, 8);
+    ctx.fill(); ctx.stroke();
+
+    // Pointer tail toward the robot.
+    ctx.beginPath();
+    ctx.moveTo(x - 7, by + boxH);
+    ctx.lineTo(x + 7, by + boxH);
+    ctx.lineTo(x, by + boxH + 10);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(40,14,16,.95)';
+    ctx.fill();
+    ctx.strokeStyle = '#e5484d'; ctx.stroke();
+
+    ctx.font = '700 10px Roboto, sans-serif';
+    ctx.fillStyle = '#ff8686';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(header, bx + 10, by + 8);
+
+    ctx.font = '400 10px Roboto, sans-serif';
+    ctx.fillStyle = '#f5d3d3';
+    lines.forEach((l, i) => ctx.fillText(l, bx + 10, by + 8 + 16 + i * lineH));
+
+    ctx.restore();
+}
+
+function roundRectPath(ctx, x, y, w, h, rad) {
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+}
+
+function wrapText(text, maxChars) {
+    const words = text.split(/\s+/);
+    const lines = [];
+    let cur = '';
+    words.forEach((w) => {
+        if ((cur + ' ' + w).trim().length > maxChars) { if (cur) lines.push(cur); cur = w; }
+        else cur = (cur + ' ' + w).trim();
+    });
+    if (cur) lines.push(cur);
+    return lines;
 }
 
 function evtPos(evt) { const r = mapCanvas.getBoundingClientRect(); return [evt.clientX - r.left, evt.clientY - r.top]; }
@@ -1348,6 +1415,7 @@ function frame(ts) {
     if (localCostmapDirty && latestLocalCostmap) { rebuildLocalCostmapImage(); localCostmapDirty = false; needsDraw = true; }
     if (globalCostmapDirty && latestGlobalCostmap) { rebuildGlobalCostmapImage(); globalCostmapDirty = false; needsDraw = true; }
     if (navStatus === 'Planning' && missionGoal && (!latestPlan || latestPlan.length === 0)) needsDraw = true;
+    if (nav2LastError && (Date.now() - nav2LastError.ts) < NAV2_ERROR_BUBBLE_MS) needsDraw = true;
     if (follow || needsDraw) { drawMap(); needsDraw = false; }
     if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
     requestAnimationFrame(frame);
@@ -1385,7 +1453,7 @@ function updateStatus() {
     document.getElementById('stat-distance').textContent =
         (distanceRemaining !== null && (navStatus === 'Navigating' || navStatus === 'Planning')) ? distanceRemaining.toFixed(2) : '—';
 
-    if (navStatus === 'Navigating') {
+    if (navStatus === 'Navigating' && !nav2StatusFresh()) {
         let reached = false;
         if (robot && missionGoal) reached = Math.hypot(robot.x - missionGoal.x, robot.y - missionGoal.y) < CFG.reachTolM;
         else if (distanceRemaining !== null) reached = distanceRemaining < 0.25;
@@ -1402,7 +1470,7 @@ function updateStatus() {
 
     const statusEl = document.getElementById('stat-nav-status');
     statusEl.textContent = navStatus;
-    const col = { Reached: 'var(--success)', Aborted: 'var(--danger)', Navigating: 'var(--primary)', Planning: 'var(--warning)' }[navStatus];
+    const col = { Reached: 'var(--success)', Aborted: 'var(--danger)', Failed: 'var(--danger)', Recovering: 'var(--warning)', Navigating: 'var(--primary)', Planning: 'var(--warning)' }[navStatus];
     statusEl.style.color = col || 'var(--muted)';
     if (planBadgeEl) planBadgeEl.classList.toggle('show', navStatus === 'Planning');
 
@@ -1500,6 +1568,7 @@ async function sendGoalPose() {
     navStatus = 'Planning';
     missionGoal = { x: t.x, y: t.y };
     latestPlan = [];
+    nav2GoalStatusCode = null; nav2ActiveNode = null; nav2Stage = null; nav2LastError = null;
     try {
         await postJSON('/navigate_to_pose', { x: t.x, y: t.y, yaw_deg: t.yaw_deg });
         notify('INFO', 'Goal sent to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
@@ -1528,6 +1597,7 @@ async function sendWaypoints() {
     const last = waypointsData[waypointsData.length - 1];
     missionGoal = { x: last.x, y: last.y };
     latestPlan = [];
+    nav2GoalStatusCode = null; nav2ActiveNode = null; nav2Stage = null; nav2LastError = null;
     const waypoints = waypointsData.map(wp => ({ x: wp.x, y: wp.y, yaw_deg: wp.yaw }));
     try {
         await postJSON('/follow_waypoints', { waypoints });
@@ -1717,12 +1787,34 @@ async function applySystemMode() {
 //  Joystick
 // =====================================================================
 const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
+const joyMaxVelInput = document.getElementById('joy-max-vel'), joyMaxAngInput = document.getElementById('joy-max-ang');
 const joy = { x: 0, y: 0, active: false, timer: null };
 let joyEnabled = false;
 
+function clamp(val, lo, hi) { return Math.min(hi, Math.max(lo, val)); }
+
+// Max linear/angular speed come from the user-editable fields; clamped to a
+// sane non-negative range so a bad/blank input can't send an unbounded command.
+function getJoyMaxVel() {
+    const v = parseFloat(joyMaxVelInput && joyMaxVelInput.value);
+    return clamp(Number.isFinite(v) ? v : 0, 0, 5);
+}
+function getJoyMaxAng() {
+    const v = parseFloat(joyMaxAngInput && joyMaxAngInput.value);
+    return clamp(Number.isFinite(v) ? v : 0, 0, 5);
+}
+
 function publishJoyRaw(turn, fwd) {
     if (!joyTopic || !rosConnected) return false;
-    joyTopic.publish(new ROSLIB.Message({ header: { frame_id: 'joy' }, axes: [turn, fwd], buttons: [] }));
+    const maxVel = getJoyMaxVel(), maxAng = getJoyMaxAng();
+    // turn/fwd are normalized joystick axes in [-1, 1]; scale by the user's
+    // max speeds and clip in-browser before publishing to /cmd_vel_joy.
+    const linX = clamp(fwd, -1, 1) * maxVel;
+    const angZ = clamp(turn, -1, 1) * maxAng;
+    joyTopic.publish(new ROSLIB.Message({
+        linear: { x: linX, y: 0, z: 0 },
+        angular: { x: 0, y: 0, z: angZ }
+    }));
     return true;
 }
 function publishJoy() {
@@ -2269,7 +2361,9 @@ const historyListEl = document.getElementById('history-list');
 
 let recognition = null;
 let recognitionRestartTimer = null;
-let recognitionRestartDelay = 80;
+let recognitionRestartDelay = 400;
+let recognitionFlapCount = 0, recognitionFlapWindowStart = 0, recognitionCoolingDown = false;
+const RECOGNITION_FLAP_LIMIT = 6, RECOGNITION_FLAP_WINDOW_MS = 10000, RECOGNITION_COOLDOWN_MS = 6000;
 let silenceCommitTimer = null;
 let lowConfidenceTimer = null;
 let transcriptText = '';
@@ -2490,7 +2584,8 @@ function bindRecognition() {
 
     recognition.onresult = (event) => {
         if (!helioOpen || agentState !== 'listening') return;
-        recognitionRestartDelay = 80;
+        recognitionRestartDelay = 400;
+        recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
         let currentInterim = '';
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
             const result = event.results[i];
@@ -2538,6 +2633,22 @@ function bindRecognition() {
     recognition.onend = () => {
         speechActive = false;
         if (!helioOpen || agentState !== 'listening') return;
+
+        const now = Date.now();
+        if (now - recognitionFlapWindowStart > RECOGNITION_FLAP_WINDOW_MS) { recognitionFlapWindowStart = now; recognitionFlapCount = 0; }
+        recognitionFlapCount++;
+        if (recognitionFlapCount > RECOGNITION_FLAP_LIMIT) {
+            if (!recognitionCoolingDown) {
+                recognitionCoolingDown = true;
+                setVoiceStatus('STABILIZING MICROPHONE...');
+            }
+            recognitionRestartTimer = setTimeout(() => {
+                recognitionRestartTimer = null; recognitionCoolingDown = false;
+                recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
+                scheduleRecognitionRestart();
+            }, RECOGNITION_COOLDOWN_MS);
+            return;
+        }
         scheduleRecognitionRestart();
     };
 }
@@ -2922,7 +3033,9 @@ const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
 let wakeWord = 'robot';
 let wakeEnabled = true;
 let wakeBlocked = false;
-let wakeRec = null, wakeRunning = false, wakeWanted = false, wakeRestartTimer = null, wakeRestartDelay = 300;
+let wakeRec = null, wakeRunning = false, wakeWanted = false, wakeRestartTimer = null, wakeRestartDelay = 800;
+let wakeFlapCount = 0, wakeFlapWindowStart = 0, wakeCoolingDown = false;
+const WAKE_FLAP_LIMIT = 6, WAKE_FLAP_WINDOW_MS = 10000, WAKE_COOLDOWN_MS = 8000;
 try {
     const savedWord = localStorage.getItem('milusions-wake-word');
     const savedState = localStorage.getItem('milusions-wake');
@@ -3018,9 +3131,27 @@ function bindWake() {
     wakeRec.onstart = () => { wakeRunning = true; };
     wakeRec.onend = () => {
         wakeRunning = false;
-        if (wakeWanted && !wakeBlocked && !helioOpen) {
-            wakeRestartTimer = setTimeout(() => { wakeRestartTimer = null; if (wakeWanted) startWake(); }, wakeRestartDelay);
+        if (!wakeWanted || wakeBlocked || helioOpen) return;
+
+        // The browser's continuous mode naturally ends every so often even
+        // with nothing wrong; restarting too eagerly makes the mic indicator
+        // rapidly flicker on/off. Track how often that happens and, if it's
+        // flapping, back off for a stable cooldown instead of retrying instantly.
+        const now = Date.now();
+        if (now - wakeFlapWindowStart > WAKE_FLAP_WINDOW_MS) { wakeFlapWindowStart = now; wakeFlapCount = 0; }
+        wakeFlapCount++;
+        if (wakeFlapCount > WAKE_FLAP_LIMIT) {
+            if (!wakeCoolingDown) {
+                wakeCoolingDown = true;
+                notify('WARNING', 'Wake mic was cycling too fast, stabilizing it - listening will resume shortly.');
+            }
+            wakeRestartTimer = setTimeout(() => {
+                wakeRestartTimer = null; wakeCoolingDown = false; wakeFlapCount = 0; wakeFlapWindowStart = Date.now();
+                if (wakeWanted) startWake();
+            }, WAKE_COOLDOWN_MS);
+            return;
         }
+        wakeRestartTimer = setTimeout(() => { wakeRestartTimer = null; if (wakeWanted) startWake(); }, wakeRestartDelay);
     };
     wakeRec.onerror = (e) => {
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -3032,7 +3163,8 @@ function bindWake() {
         }
     };
     wakeRec.onresult = (ev) => {
-        wakeRestartDelay = 300;
+        wakeRestartDelay = 800;
+        wakeFlapCount = 0; wakeFlapWindowStart = Date.now();
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
             const heard = ev.results[i][0].transcript || '';
             const re = new RegExp('\\bhey\\s+' + wakeWord + '\\b', 'i');

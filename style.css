@@ -224,9 +224,9 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .workspace {
     flex: 1; min-height: 0; padding: 8px;
     display: grid; gap: 8px;
-    grid-template-columns: minmax(0, 1fr) 320px 290px;
-    grid-template-rows: minmax(0, 1fr) 200px;
-    grid-template-areas: "map ctrl side" "graphs graphs graphs";
+    grid-template-columns: 290px minmax(0, 1fr) 290px;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "side map ctrl";
 }
 .p-map { grid-area: map; }
 .col-ctrl { grid-area: ctrl; display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; overflow: hidden; }
@@ -477,38 +477,36 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 
 /* ----- Responsive ----- */
 @media (max-width: 1280px) {
-    .workspace { grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) 200px; grid-template-areas: "map ctrl" "map side" "graphs graphs"; }
-    .side { flex-direction: row; }
-    .side > .panel { flex: 1; }
+    .workspace { grid-template-columns: 260px minmax(0, 1fr) 260px; }
 }
 @media (max-width: 1024px) {
     body { height: auto; min-height: 100vh; overflow: auto; }
     .main-wrapper { height: auto; }
     .workspace { display: flex; flex-direction: column; }
-    .p-map { height: 460px; flex: none; }
-    .side { flex-direction: column; }
-    .side > .panel { min-height: 300px; }
-    .graphs { grid-template-columns: 1fr 1fr; }
-    .graphs .panel { height: 190px; }
+    .p-map { height: 55vh; min-height: 320px; flex: none; order: 1; }
+    .side { flex-direction: row; order: 2; }
+    .side > .panel { flex: 1; min-height: 220px; }
+    .col-ctrl { order: 3; }
 }
+/* Nav bar auto-hides below this width to give the workspace room. */
 @media (max-width: 900px) {
-    :root { --sidebar-w: 64px; }
-    .sidebar { width: 64px; padding: 1rem 0.5rem; align-items: center; }
-    .brand-title, .nav-item .lbl { display: none; }
-    .brand-container { padding: 0; }
-    .brand-logo { width: 38px; height: 38px; }
-    .nav-item { justify-content: center; padding: 0.6rem; }
+    :root { --sidebar-w: 0px; }
+    .sidebar { display: none; }
 }
 @media (max-width: 640px) {
-    :root { --sidebar-w: 0px; }
     body { display: block; }
-    .brand-logo { width: 36px; height: 36px; border-radius: 9px; }
-    .sidebar { width: 100%; flex-direction: row; align-items: center; padding: 0.6rem 1rem; border-right: none; border-bottom: 1px solid var(--border); }
     .main-wrapper { height: auto; }
-    .header-bar { height: auto; padding: 0.7rem 1rem; }
-    .header-title h2 { font-size: 0.9rem; }
-    .graphs { grid-template-columns: 1fr; }
-    .p-map { height: 340px; }
+    .header-bar { height: auto; padding: 0.6rem 0.8rem; flex-wrap: wrap; }
+    .header-title h2 { font-size: 0.85rem; }
+    .workspace { padding: 6px; gap: 6px; }
+    .p-map { height: 46vh; min-height: 260px; }
+    .side { flex-direction: column; }
+    .side > .panel { min-height: 0; }
+    .joy-pad { width: min(60vw, 220px); height: min(60vw, 220px); }
+    .kv { padding: 7px 10px; font-size: 0.72rem; min-height: 34px; }
+    .panel-hd { height: 28px; font-size: 0.7rem; }
+    .btn { font-size: 0.72rem; padding: 6px 8px; }
+    .field { font-size: 0.75rem; }
 
     .modal-assistant-title { font-size: 1.8rem; top: 1.25rem; }
     .robot-face { width: 260px; height: 150px; padding: 0 20px; }

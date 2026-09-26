@@ -147,7 +147,65 @@
         </header>
 
         <main class="workspace">
-            <!-- SLAM Map -->
+            <!-- Status + Joystick (left) -->
+            <div class="side">
+                <section class="panel">
+                    <div class="panel-hd"><span>System Status</span></div>
+                    <div>
+                        <div class="kv"><span class="k">Mode</span>
+                            <span class="v"><span class="mode-chip" id="mode-chip"><span class="mode-dot"></span><span
+                                        id="stat-mode">Unknown</span></span></span>
+                        </div>
+                        <div class="kv"><span class="k">Nav Status</span>
+                            <span class="v" id="stat-nav-status">Idle</span>
+                        </div>
+                        <div class="kv"><span class="k">Distance</span>
+                            <span class="v mono"><span id="stat-distance">—</span><span class="u">m</span></span>
+                        </div>
+                        <div class="kv"><span class="k">Speed</span>
+                            <span class="v mono"><span id="stat-speed">0.00</span><span class="u">m/s</span></span>
+                        </div>
+                        <div class="kv"><span class="k">Heading</span>
+                            <span class="v mono">
+                                <svg id="hdg-arrow" viewBox="0 0 24 24">
+                                    <path d="M12 2l6 18-6-4-6 4z" />
+                                </svg>
+                                <span id="stat-heading">—</span><span class="u">&deg;</span></span>
+                        </div>
+                        <div class="kv"><span class="k">Location</span>
+                            <span class="v mono" id="stat-location">X — &nbsp; Y —</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel" style="flex:1;">
+                    <div class="panel-hd"><span>Joystick</span><span class="sub mono">/cmd_vel_joy</span></div>
+                    <div class="panel-body">
+                        <div class="joy-wrap">
+                            <div class="joy-pad" id="joy-pad">
+                                <div class="joy-knob" id="joy-knob"></div>
+                            </div>
+                            <div class="joy-read mono" style="align-items: center; flex-wrap: wrap; gap: 6px;">
+                                <button id="joy-enable-btn" class="btn btn-secondary"
+                                    style="height: 22px; padding: 0 8px; font-size: 0.65rem;"
+                                    onclick="toggleJoyEnable()">Enable</button>
+                                <span>fwd <b id="joy-y">0.00</b></span>
+                                <span>turn <b id="joy-x">0.00</b></span>
+                            </div>
+                            <div class="joy-read mono" style="align-items: center; gap: 6px;">
+                                <label for="joy-max-vel" style="font-size:0.65rem;">max vel (m/s)</label>
+                                <input id="joy-max-vel" class="field" type="number" step="0.05" min="0" value="0.5"
+                                    style="width: 70px; height: 22px; padding: 0 6px; font-size: 0.65rem;">
+                                <label for="joy-max-ang" style="font-size:0.65rem;">max ang (rad/s)</label>
+                                <input id="joy-max-ang" class="field" type="number" step="0.05" min="0" value="1.0"
+                                    style="width: 70px; height: 22px; padding: 0 6px; font-size: 0.65rem;">
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- SLAM Map (center) -->
             <section class="panel p-map">
                 <div class="panel-hd">
                     <span>SLAM Map 3D <span class="sub" id="map-meta"></span></span>
@@ -255,31 +313,10 @@
                 </div>
             </section>
 
-            <!-- Mission Control -->
+            <!-- System Mode (right) -->
             <div class="col-ctrl">
-                <section class="panel video-panel">
-                    <div class="panel-hd">
-                        <span>RGB Camera</span>
-                        <span class="video-state" id="rgb-webrtc-state">OFFLINE</span>
-                    </div>
-                    <div class="video-body">
-                        <video id="rgb-video" class="webrtc-video" autoplay playsinline muted></video>
-                        <div class="video-empty" id="rgb-video-empty">RGB WebRTC Feed Offline</div>
-                    </div>
-                </section>
-
-                <section class="panel video-panel">
-                    <div class="panel-hd">
-                    <span>Depth Camera</span>
-                        <span class="video-state" id="depth-webrtc-state">OFFLINE</span>
-                    </div>
-                    <div class="video-body">
-                        <video id="depth-video" class="webrtc-video" autoplay playsinline muted></video>
-                        <div class="video-empty" id="depth-video-empty">Depth WebRTC Feed Offline</div>
-                    </div>
-                </section>
                 <aside class="panel ctrl-panel">
-                    <div class="panel-hd"><span>Mission Control</span></div>
+                    <div class="panel-hd"><span>System Mode</span></div>
                     <div class="panel-body scroll">
                         <div class="ctrl-body">
                             <div>
@@ -307,88 +344,6 @@
                         </div>
                     </div>
                 </aside>
-            </div>
-
-            <!-- Status + Joystick -->
-            <div class="side">
-                <section class="panel">
-                    <div class="panel-hd"><span>Status</span></div>
-                    <div>
-                        <div class="kv"><span class="k">Mode</span>
-                            <span class="v"><span class="mode-chip" id="mode-chip"><span class="mode-dot"></span><span
-                                        id="stat-mode">Unknown</span></span></span>
-                        </div>
-                        <div class="kv"><span class="k">Nav Status</span>
-                            <span class="v" id="stat-nav-status">Idle</span>
-                        </div>
-                        <div class="kv"><span class="k">Distance</span>
-                            <span class="v mono"><span id="stat-distance">—</span><span class="u">m</span></span>
-                        </div>
-                        <div class="kv"><span class="k">Speed</span>
-                            <span class="v mono"><span id="stat-speed">0.00</span><span class="u">m/s</span></span>
-                        </div>
-                        <div class="kv"><span class="k">Heading</span>
-                            <span class="v mono">
-                                <svg id="hdg-arrow" viewBox="0 0 24 24">
-                                    <path d="M12 2l6 18-6-4-6 4z" />
-                                </svg>
-                                <span id="stat-heading">—</span><span class="u">&deg;</span></span>
-                        </div>
-                        <div class="kv"><span class="k">Location</span>
-                            <span class="v mono" id="stat-location">X — &nbsp; Y —</span>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="panel" style="flex:1;">
-                    <div class="panel-hd"><span>Joystick</span><span class="sub mono">/joy</span></div>
-                    <div class="panel-body">
-                        <div class="joy-wrap">
-                            <div class="joy-pad" id="joy-pad">
-                                <div class="joy-knob" id="joy-knob"></div>
-                            </div>
-                            <div class="joy-read mono" style="align-items: center;">
-                                <button id="joy-enable-btn" class="btn btn-secondary"
-                                    style="height: 22px; padding: 0 8px; font-size: 0.65rem;"
-                                    onclick="toggleJoyEnable()">Enable</button>
-                                <span>fwd <b id="joy-y">0.00</b></span>
-                                <span>turn <b id="joy-x">0.00</b></span>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            </div>
-
-            <!-- Wheel graphs -->
-            <div class="graphs">
-                <section class="panel">
-                    <div class="panel-hd"><span>Front Left Wheel</span>
-                        <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fl-a">—</b></span><span
-                                class="b"><i></i>cmd<b id="lg-fl-c">—</b></span></div>
-                    </div>
-                    <div class="panel-body"><canvas class="chart-canvas" id="chart-fl"></canvas></div>
-                </section>
-                <section class="panel">
-                    <div class="panel-hd"><span>Front Right Wheel</span>
-                        <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-fr-a">—</b></span><span
-                                class="b"><i></i>cmd<b id="lg-fr-c">—</b></span></div>
-                    </div>
-                    <div class="panel-body"><canvas class="chart-canvas" id="chart-fr"></canvas></div>
-                </section>
-                <section class="panel">
-                    <div class="panel-hd"><span>Rear Left Wheel</span>
-                        <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-bl-a">—</b></span><span
-                                class="b"><i></i>cmd<b id="lg-bl-c">—</b></span></div>
-                    </div>
-                    <div class="panel-body"><canvas class="chart-canvas" id="chart-bl"></canvas></div>
-                </section>
-                <section class="panel">
-                    <div class="panel-hd"><span>Rear Right Wheel</span>
-                        <div class="chart-legend mono"><span class="a"><i></i>actual<b id="lg-br-a">—</b></span><span
-                                class="b"><i></i>cmd<b id="lg-br-c">—</b></span></div>
-                    </div>
-                    <div class="panel-body"><canvas class="chart-canvas" id="chart-br"></canvas></div>
-                </section>
             </div>
         </main>
     </div>
