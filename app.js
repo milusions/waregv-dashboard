@@ -2428,13 +2428,26 @@ const HelioIdleController = {
     }
 };
 
+let outputTranscript = '';
 function setVoiceStatus() {}
 function renderTranscript() {
     const el = document.getElementById('helio-transcript');
     if (!el) return;
-    const text = [transcriptText, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-    el.textContent = text;
-    el.classList.toggle('show', !!text);
+    const input = [transcriptText, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    el.innerHTML = '';
+    if (input) {
+        const inLine = document.createElement('div');
+        inLine.className = 'helio-transcript-in';
+        inLine.textContent = input;
+        el.appendChild(inLine);
+    }
+    if (outputTranscript) {
+        const outLine = document.createElement('div');
+        outLine.className = 'helio-transcript-out';
+        outLine.textContent = outputTranscript;
+        el.appendChild(outLine);
+    }
+    el.classList.toggle('show', !!(input || outputTranscript));
 }
 
 function setFace(state) {
@@ -2628,7 +2641,7 @@ function bindRecognition() {
 function resumeListening() {
     if (!helioOpen) return;
     agentState = 'listening';
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
+    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
     renderTranscript();
     setVoiceStatus('LISTENING CONTINUOUSLY', true);
     setFace('listening');
@@ -2653,7 +2666,7 @@ function activateHelio(greeting) {
     const hist = document.getElementById('modal-history-column'); if (hist) hist.classList.remove('show');
     PeekController.stop();
 
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
+    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
     renderTranscript();
     clearVoiceTimers();
     commandSeq += 1;
@@ -2687,7 +2700,7 @@ function closeVoiceModal() {
     EyeMotion.stop();
     if (blinkTimer) { clearTimeout(blinkTimer); blinkTimer = null; }
     if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0;
+    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
     renderTranscript();
     PeekController.start();
     syncWake();
@@ -2781,6 +2794,8 @@ async function handleCommand(text) {
     
     notifyHelioState('output_generated', 'speaking', answer, '');
     appendHistory('agent', answer);
+    outputTranscript = answer;
+    renderTranscript();
     
     agentState = 'speaking';
     setVoiceStatus();

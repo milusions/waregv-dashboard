@@ -649,8 +649,10 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .robot-face.speaking .eye{animation:helioSpeak .5s ease-in-out infinite;background:#0077ff}
 .robot-face.happy .eye{height:clamp(58px,10vh,96px);border-radius:26px 26px 46px 46px}
 .robot-face.blink .eye{animation:helioBlink .22s ease-in-out 1}
-.helio-transcript{position:relative;z-index:3;margin-top:clamp(28px,6vh,56px);max-width:82%;min-height:1.4em;text-align:center;color:#fff;font-size:clamp(.95rem,1.6vw,1.25rem);font-weight:500;line-height:1.5;letter-spacing:.01em;opacity:0;transform:translateY(4px);transition:opacity .2s ease,transform .2s ease;text-shadow:0 0 12px rgba(0,119,255,.35)}
+.helio-transcript{position:relative;z-index:3;margin-top:clamp(28px,6vh,56px);max-width:82%;min-height:1.4em;text-align:center;color:#fff;font-size:clamp(.95rem,1.6vw,1.25rem);font-weight:500;line-height:1.5;letter-spacing:.01em;opacity:0;transform:translateY(4px);transition:opacity .2s ease,transform .2s ease;text-shadow:0 0 12px rgba(0,119,255,.35);display:flex;flex-direction:column;gap:6px}
 .helio-transcript.show{opacity:1;transform:translateY(0)}
+.helio-transcript-in{font-style:normal;font-weight:500}
+.helio-transcript-out{font-style:italic;font-weight:400;opacity:.82}
 @keyframes helioWake{0%{transform:scaleY(.15)}55%{transform:scaleY(1.12)}100%{transform:scaleY(1)}}
 @keyframes helioBlink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.08)}}
 @keyframes helioBreath{0%,100%{transform:scaleY(.98)}50%{transform:scaleY(1.015)}}
