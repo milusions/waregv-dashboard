@@ -2654,6 +2654,8 @@ function openVoiceModal() {
         alert('Continuous speech recognition is not supported in this browser. Use Chrome or Edge.');
         return;
     }
+    wakeBlocked = false; // a direct tap is a valid user gesture — always worth retrying mic access
+    updateWakeBtn();
     activateHelio();
 }
 

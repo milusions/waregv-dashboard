@@ -583,11 +583,16 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 @media (max-width: 1024px) {
     body { height: auto; min-height: 100vh; overflow: auto; }
     .main-wrapper { height: auto; }
-    .workspace { display: flex; flex-direction: column; }
-    .p-map { height: 55vh; min-height: 320px; flex: none; order: 1; }
-    .side { flex-direction: row; order: 2; }
-    .side > .panel { flex: 1; min-height: 220px; }
-    .col-ctrl { order: 3; }
+    .workspace { display: flex; flex-direction: column; height: auto; }
+    .p-map { height: 50vh; min-height: 300px; flex: none; order: 1; }
+    .side { flex-direction: column; order: 2; }
+    .side > .panel { flex: none; min-height: 0; }
+    .side > .panel:first-child { flex: none; height: auto; min-height: 0; }
+    .joystick-panel { flex: none; height: auto; }
+    .joystick-panel .panel-body { overflow: visible; }
+    .col-ctrl { order: 3; flex: none; overflow: visible; }
+    .col-ctrl .camera-panel-rgb, .col-ctrl .camera-panel-depth { flex: none !important; min-height: 200px !important; }
+    .col-ctrl .nav2-logs-panel { flex: none !important; min-height: 200px !important; }
 }
 /* Nav bar auto-hides below this width to give the workspace room. */
 @media (max-width: 900px) {
@@ -597,25 +602,38 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 @media (max-width: 640px) {
     body { display: block; }
     .main-wrapper { height: auto; }
-    .header-bar { height: auto; padding: 0.6rem 0.8rem; flex-wrap: wrap; }
+    .header-bar { height: auto; padding: 0.55rem 0.7rem; flex-wrap: wrap; row-gap: 8px; }
+    .header-title { flex: 1 1 100%; }
     .header-title h2 { font-size: 0.85rem; }
+    .header-actions { flex: 1 1 100%; justify-content: flex-start; gap: 0.45rem; }
+    .header-actions .status-badge { order: 1; }
+    .icon-btn.logout-btn { padding: 0 10px; font-size: 0.75rem; }
     .workspace { padding: 6px; gap: 6px; }
-    .p-map { height: 46vh; min-height: 260px; }
+    .p-map { height: 42vh; min-height: 240px; }
+    .panel-hd { flex-wrap: wrap; height: auto; min-height: 28px; padding: 5px 8px; font-size: 0.7rem; gap: 4px; }
+    .panel-tools { flex-wrap: wrap; gap: 3px; }
     .side { flex-direction: column; }
     .side > .panel { min-height: 0; }
-    .joy-pad { width: min(54vw, 150px); height: min(54vw, 150px); }
+    .joy-pad { width: min(60vw, 160px); height: min(60vw, 160px); }
     .kv { padding: 7px 10px; font-size: 0.72rem; min-height: 34px; }
-    .panel-hd { height: 28px; font-size: 0.7rem; }
     .btn { font-size: 0.72rem; padding: 6px 8px; }
     .field { font-size: 0.75rem; }
+    .input-group { grid-template-columns: 1fr 1fr; }
+    .col-ctrl .camera-panel-rgb, .col-ctrl .camera-panel-depth { min-height: 160px !important; }
 
-    .modal-assistant-title { font-size: 1.8rem; top: 1.25rem; }
-    .robot-face { width: 260px; height: 150px; padding: 0 20px; }
-    .eye { width: 56px; height: 90px; border-radius: 28px; }
+    .modal-assistant-title { font-size: 1.5rem; top: 1rem; }
     .modal-history-column { display: none; }
-    .caption-container { margin-top: 1rem; }
-    .close-modal-btn { top: 1rem; right: 1rem; width: 36px; height: 36px; font-size: 1.2rem; }
-    .speech-bubble { right: -20px; max-width: 200px; font-size: 0.8rem; }
+    .robot-screen { width: min(88vw, 88vh); height: min(78vw, 78vh); border-radius: 40px; border-width: 8px; }
+    .modal-main-column { padding: 60px 10px 90px; }
+    .helio-transcript { font-size: 0.85rem; max-width: 92%; }
+}
+@media (max-width: 420px) {
+    .header-brand { font-size: 0.88rem; }
+    .header-brand small { font-size: 0.68rem; }
+    .status-badge { font-size: 0.68rem; padding: 3px 8px; }
+    .wake-btn .wake-label { display: none; }
+    .icon-btn.logout-btn { padding: 0 8px; }
+    .waergv-panel-copy small { display: none; }
 }
 
 /* =====================================================================
@@ -688,7 +706,7 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .modal-history-column{position:absolute;top:0;right:0;bottom:0;width:min(380px,88vw);display:flex;flex-direction:column;overflow:hidden;background:rgba(10,14,22,.98);border-left:1px solid rgba(255,255,255,.1);box-shadow:-14px 0 38px rgba(0,0,0,.35);transform:translateX(100%);transition:transform .28s ease;z-index:40}.modal-history-column.show{transform:translateX(0)}
 .history-header{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.08);color:#dbe3ed;font-size:.78rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.close-history-btn{border:0;background:transparent;color:#9aa4b2;font-size:1.6rem;cursor:pointer}.close-history-btn:hover{color:#fff}.history-list{flex:1;overflow-y:auto;padding:14px}.history-item{margin-bottom:9px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.05);color:#dce3ec;font-size:.78rem;line-height:1.45}.history-label{margin-bottom:3px;color:#72b3ff;font-weight:800}
 /* Wake-word menu remains a dashboard utility; it is separate from Helio's continuous speech session. */
-.wake-menu-wrap{position:relative}.icon-btn.wake-btn{width:auto;padding:0 8px;gap:6px;font-size:.72rem;font-weight:600}.wake-btn .caret{width:14px;height:14px;opacity:.7}.wake-label{text-transform:capitalize}.wake-menu{position:absolute;top:calc(100% + 6px);right:0;min-width:180px;padding:6px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 30px rgba(0,0,0,.2);z-index:100}.wake-menu[hidden]{display:none}.wake-menu .wm-title{padding:6px 10px 4px;font-size:.64rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.wake-menu button{width:100%;display:flex;justify-content:space-between;padding:7px 10px;border:0;border-radius:5px;background:transparent;color:var(--text);cursor:pointer;text-align:left;font-size:.76rem}.wake-menu button:hover{background:var(--panel-2)}.wake-menu button.sel{color:var(--primary);font-weight:700}.wake-menu button.sel::after{content:"✓"}.wake-menu hr{border:0;height:1px;background:var(--border);margin:4px 0}.wake-menu .wm-toggle{text-transform:none}.wake-menu .wm-toggle::after{content:attr(data-state);font-size:.7rem;font-weight:700;color:var(--muted)}.wake-menu .wm-toggle.on::after{color:var(--success)}
+.wake-menu-wrap{position:relative}.icon-btn.wake-btn{width:auto;padding:0 8px;gap:6px;font-size:.72rem;font-weight:600}.wake-btn .caret{width:14px;height:14px;opacity:.7}.wake-label{text-transform:capitalize}.wake-menu{position:absolute;top:calc(100% + 6px);right:0;min-width:180px;max-width:min(260px,90vw);padding:6px;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 30px rgba(0,0,0,.2);z-index:100}.wake-menu[hidden]{display:none}.wake-menu .wm-title{padding:6px 10px 4px;font-size:.64rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.wake-menu button{width:100%;display:flex;justify-content:space-between;padding:9px 10px;border:0;border-radius:5px;background:transparent;color:var(--text);cursor:pointer;text-align:left;font-size:.8rem}.wake-menu button:hover{background:var(--panel-2)}.wake-menu button.sel{color:var(--primary);font-weight:700}.wake-menu button.sel::after{content:"✓"}.wake-menu hr{border:0;height:1px;background:var(--border);margin:4px 0}.wake-menu .wm-toggle{text-transform:none}.wake-menu .wm-toggle::after{content:attr(data-state);font-size:.7rem;font-weight:700;color:var(--muted)}.wake-menu .wm-toggle.on::after{color:var(--success)}
 body:has(.voice-modal.active) .helio-fab-wrap{display:none}
 .workspace.is-reordering .panel{transition:transform .16s ease, opacity .16s ease}
 .panel-drag-handle{flex:none;width:30px;height:22px;padding:0;margin-right:3px;border:0;border-radius:4px;background:transparent;color:var(--muted);font-size:.72rem;line-height:1;letter-spacing:-.08em;cursor:pointer}
@@ -711,7 +729,7 @@ body:has(.voice-modal.active) .helio-fab-wrap{display:none}
 
 @media (max-width:1050px){.helio-top-right{right:14px}}
 @media (max-width:820px){.sidebar{display:none}:root{--sidebar-w:0px}.robot-screen{width:min(80vw,80vh)}}
-@media (max-width:640px){.header-bar{height:58px;padding:0 10px}.header-title h2{font-size:.86rem}.helio-top-right{top:14px;right:10px;gap:6px}.helio-top-right .icon-btn{width:38px;height:38px}.modal-assistant-title{top:22px;font-size:1.7rem}.modal-main-column{padding:70px 12px 120px}.robot-screen{width:min(80vw,80vh);height:min(68vw,68vh);aspect-ratio:auto;border-radius:44px;border-width:7px}.helio-fab{height:42px;padding:0 15px}.helio-fab svg{width:19px;height:19px}.helio-fab span{font-size:.78rem}}
+@media (max-width:640px){.helio-top-right{top:14px;right:10px;gap:6px}.helio-top-right .icon-btn{width:38px;height:38px}.modal-assistant-title{top:22px;font-size:1.7rem}.modal-main-column{padding:70px 12px 120px}.robot-screen{width:min(80vw,80vh);height:min(68vw,68vh);aspect-ratio:auto;border-radius:44px;border-width:7px}.helio-fab{height:42px;padding:0 15px}.helio-fab svg{width:19px;height:19px}.helio-fab span{font-size:.78rem}}
 
 /* ----- Rover IP dialog & inline connection form ----- */
 .rover-ip-dialog {
@@ -1205,4 +1223,36 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     flex: 1 1 0 !important;
     height: auto !important;
     min-height: 0 !important;
+}
+
+/* =====================================================================
+   MOBILE / TABLET OVERRIDES — must come last to win over the fixed
+   desktop three-column sizing rules above (which use !important).
+   ===================================================================== */
+@media (max-width: 1024px) {
+    .col-ctrl { overflow: visible !important; }
+    .col-ctrl > .camera-panel-rgb,
+    .col-ctrl > .camera-panel-depth,
+    .col-ctrl .camera-panel-rgb,
+    .col-ctrl .camera-panel-depth {
+        flex: none !important;
+        min-height: 200px !important;
+        height: 200px !important;
+    }
+    .col-ctrl > .nav2-logs-panel {
+        flex: none !important;
+        height: auto !important;
+        min-height: 220px !important;
+    }
+}
+@media (max-width: 640px) {
+    .col-ctrl > .camera-panel-rgb,
+    .col-ctrl > .camera-panel-depth,
+    .col-ctrl .camera-panel-rgb,
+    .col-ctrl .camera-panel-depth {
+        min-height: 160px !important;
+        height: 160px !important;
+    }
+    .side > .panel:first-child { flex: none !important; height: auto !important; min-height: 0 !important; }
+    .joystick-panel { flex: none !important; height: auto !important; }
 }
