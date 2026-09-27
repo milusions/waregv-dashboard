@@ -300,7 +300,7 @@ body:not(.light-theme) #theme-btn .ico-moon { display: none; }
 .legend-swatch-plan { background:var(--primary); }
 .legend-swatch-local { background:#ff8c00; }
 .legend-swatch-global { background:#9c27b0; }
-.legend-swatch-scan { background:#ffee00; }
+.legend-swatch-scan { background:#ff6f00; }
 
 /* ----- Map pose action popup ----- */
 .map-pose-popup {

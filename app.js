@@ -1028,10 +1028,10 @@ function drawMap() {
     if (layerVis.localCostmap && latestLocalCostmap) drawGrid(latestLocalCostmap, localCostmapCanvasOff);
 
     if (layerVis.scan && latestScanPoints && latestScanPoints.length) {
-        ctx.fillStyle = '#ffee00';
+        ctx.fillStyle = '#ff6f00';
         for (let i = 0; i < latestScanPoints.length; i++) {
             const p = w2s(latestScanPoints[i].x, latestScanPoints[i].y);
-            ctx.fillRect(p[0] - 1, p[1] - 1, 2, 2);
+            ctx.fillRect(p[0] - 2, p[1] - 2, 4, 4);
         }
     }
 
