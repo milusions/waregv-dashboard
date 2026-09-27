@@ -62,7 +62,7 @@ const TOPICS = {
     jointStates: '/joint_states',
     localCostmap: '/local_costmap/costmap',
     globalCostmap: '/global_costmap/costmap',
-    scan: '/scan/pointcloud',
+    scan: '/scan',
     joy: '/cmd_vel_joy',
     tf: '/tf',
     tfStatic: '/tf_static',
@@ -77,18 +77,20 @@ let latestScanPoints = [];
 function onScanPointCloudMsg(msg) {
     const pts = [];
     try {
-        const fields = msg.fields || [];
-        const xf = fields.find(f => f.name === 'x'), yf = fields.find(f => f.name === 'y');
-        if (xf && yf && msg.data) {
-            const buf = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0)).buffer;
-            const dv = new DataView(buf);
-            const step = msg.point_step;
-            for (let i = 0; i < msg.width * msg.height; i++) {
-                const off = i * step;
-                pts.push({ x: dv.getFloat32(off + xf.offset, true), y: dv.getFloat32(off + yf.offset, true) });
-            }
+        const ranges = msg.ranges || [];
+        const angleMin = msg.angle_min, angleInc = msg.angle_increment;
+        const rMin = msg.range_min, rMax = msg.range_max;
+        const rx = robot ? robot.x : 0, ry = robot ? robot.y : 0, ryaw = robot ? robot.yaw : 0;
+        for (let i = 0; i < ranges.length; i++) {
+            const r = ranges[i];
+            if (!isFinite(r) || r < rMin || r > rMax) continue;
+            const ang = angleMin + i * angleInc;
+            const lx = r * Math.cos(ang), ly = r * Math.sin(ang);
+            const wx = rx + lx * Math.cos(ryaw) - ly * Math.sin(ryaw);
+            const wy = ry + lx * Math.sin(ryaw) + ly * Math.cos(ryaw);
+            pts.push({ x: wx, y: wy });
         }
-    } catch (e) { /* ignore malformed pointcloud */ }
+    } catch (e) { /* ignore malformed scan */ }
     latestScanPoints = pts;
     needsDraw = true;
 }
@@ -657,7 +659,7 @@ function subscribeAllTopics() {
     rosSubscribe(TOPICS.plan, 'nav_msgs/Path', onPlanMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.localCostmap, 'nav_msgs/OccupancyGrid', onLocalCostmapMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.globalCostmap, 'nav_msgs/OccupancyGrid', onGlobalCostmapMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.scan, 'sensor_msgs/PointCloud2', onScanPointCloudMsg, { queue_length: 1 });
+    rosSubscribe(TOPICS.scan, 'sensor_msgs/LaserScan', onScanPointCloudMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.nav2Status, 'action_msgs/GoalStatusArray', onNav2GoalStatusMsg, { queue_length: 1 });
     rosSubscribe(TOPICS.btLog, 'nav2_msgs/BehaviorTreeLog', onBTLogMsg, { queue_length: 5 });
     rosSubscribe(TOPICS.rosout, 'rcl_interfaces/Log', onRosoutMsg, { queue_length: 10 });
@@ -1026,7 +1028,7 @@ function drawMap() {
     if (layerVis.localCostmap && latestLocalCostmap) drawGrid(latestLocalCostmap, localCostmapCanvasOff);
 
     if (layerVis.scan && latestScanPoints && latestScanPoints.length) {
-        ctx.fillStyle = '#00e5ff';
+        ctx.fillStyle = '#ffee00';
         for (let i = 0; i < latestScanPoints.length; i++) {
             const p = w2s(latestScanPoints[i].x, latestScanPoints[i].y);
             ctx.fillRect(p[0] - 1, p[1] - 1, 2, 2);
