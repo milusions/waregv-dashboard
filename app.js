@@ -48,9 +48,9 @@ const HELIO_WS_URL = `ws://${ROVER_IP}:8001/ws/helio`;
 const CFG = {
     chartWindowSec: 30,
     joyRateHz: 20,
-    reachTolM: 0.30,          // "Reached" when the rover is this close to the mission goal
-    planTimeoutMs: 20000,     // abort if Nav2 publishes no /plan after a goal
-    cmdVelStaleMs: 600,       // hide the cmd_vel arrows when /cmd_vel goes quiet
+    reachTolM: 0.30,
+    planTimeoutMs: 20000,
+    cmdVelStaleMs: 600,
     rosRetryMs: 3000
 };
 
@@ -71,7 +71,6 @@ const TOPICS = {
     rosout: '/rosout'
 };
 
-// --- Layer visibility, driven by the map legend checkboxes ---
 const layerVis = { map: true, plan: true, localCostmap: true, globalCostmap: true, scan: true };
 let latestScanPoints = [];
 function onScanPointCloudMsg(msg) {
@@ -90,7 +89,7 @@ function onScanPointCloudMsg(msg) {
             const wy = ry + lx * Math.sin(ryaw) + ly * Math.cos(ryaw);
             pts.push({ x: wx, y: wy });
         }
-    } catch (e) { /* ignore malformed scan */ }
+    } catch (e) {}
     latestScanPoints = pts;
     needsDraw = true;
 }
@@ -209,35 +208,31 @@ window.toggleDocumentFullscreen = toggleDocumentFullscreen;
 let mapImageDirty = false, needsDraw = true;
 let latestMap = null;
 let latestPlan = [];
-let navStatus = 'Idle';            // Idle | Planning | Navigating | Recovering | Reached | Aborted | Failed
-let missionGoal = null;            // {x, y} final goal of the running mission
+let navStatus = 'Idle';
+let missionGoal = null;
 let ignorePlansUntil = 0;
 let distanceRemaining = null;
 
-// --- Nav2 fine-grained state (from real Nav2 topics, not guessed) ---
-// GoalStatus codes per action_msgs/msg/GoalStatus.
 const NAV2_GOAL_STATUS_NAMES = {
     0: 'UNKNOWN', 1: 'ACCEPTED', 2: 'EXECUTING', 3: 'CANCELING',
     4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'
 };
-let nav2GoalStatusCode = null;     // last GoalStatus string, e.g. 'EXECUTING'
-let nav2ActiveNode = null;         // last BT leaf/control node reported RUNNING
-let nav2Stage = null;              // human label shown in the map tag, e.g. 'Recovery: Spin'
-let nav2StatusMsgAt = 0;           // last time we heard a *real* Nav2 status/BT message
-let nav2LastError = null;          // { text, node, level, ts } - most recent rosout WARN/ERROR from a nav2 node
-const nav2LogHistory = [];          // stored Nav2 WARN/ERROR messages for the Logs carousel
+let nav2GoalStatusCode = null;
+let nav2ActiveNode = null;
+let nav2Stage = null;
+let nav2StatusMsgAt = 0;
+let nav2LastError = null;
+const nav2LogHistory = [];
 let nav2LogIndex = -1;
 const NAV2_LOG_HISTORY_MAX = 50;
-const NAV2_STATUS_FRESH_MS = 4000; // how long a real Nav2 signal is considered authoritative
-const NAV2_ERROR_BUBBLE_MS = 12000; // how long the chat-bubble stays up after an error
+const NAV2_STATUS_FRESH_MS = 4000;
+const NAV2_ERROR_BUBBLE_MS = 12000;
 const NAV2_NODE_RE = /bt_navigator|controller_server|planner_server|recoveries_server|behavior_server|waypoint_follower|smoother_server|velocity_smoother|collision_monitor|costmap/i;
 const NAV2_RECOVERY_NODE_RE = /recover|spin|back ?up|wait|clear ?costmap|assisted_teleop/i;
 const NAV2_PLAN_NODE_RE = /computepathtopose|compute_path|planner|smoothpath|smooth_path/i;
 
 function nav2StatusFresh() { return Date.now() - nav2StatusMsgAt < NAV2_STATUS_FRESH_MS; }
 
-// Turns a BT node name like "RecoveryNode" / "Spin" / "ComputePathToPose" into
-// something readable to sit next to the location arrow.
 function nav2StageLabel(nodeName) {
     if (!nodeName) return null;
     if (NAV2_RECOVERY_NODE_RE.test(nodeName)) return 'Recovering: ' + nodeName;
@@ -246,8 +241,6 @@ function nav2StageLabel(nodeName) {
     return nodeName;
 }
 
-// Reconciles the last GoalStatus + last active BT node into the single
-// navStatus the rest of the UI reads, and the human-readable stage tag.
 function applyNav2Status() {
     const isRecovery = nav2ActiveNode && NAV2_RECOVERY_NODE_RE.test(nav2ActiveNode);
     nav2Stage = nav2StageLabel(nav2ActiveNode) || (nav2GoalStatusCode ? nav2GoalStatusCode : null);
@@ -281,7 +274,6 @@ function applyNav2Status() {
     needsDraw = true;
 }
 
-// rosout Log levels (rcl_interfaces/msg/Log).
 const ROSOUT_WARN = 30, ROSOUT_ERROR = 40, ROSOUT_FATAL = 50;
 function onRosoutMsg(msg) {
     if (!msg || msg.level < ROSOUT_WARN) return;
@@ -299,7 +291,6 @@ function onRosoutMsg(msg) {
     nav2LastError = entry;
     nav2StatusMsgAt = entry.ts;
 
-    // Avoid filling the carousel with an identical burst from the same node.
     const previous = nav2LogHistory[nav2LogHistory.length - 1];
     if (!previous || previous.text !== entry.text || previous.node !== entry.node || previous.level !== entry.level) {
         nav2LogHistory.push(entry);
@@ -307,7 +298,6 @@ function onRosoutMsg(msg) {
         nav2LogIndex = nav2LogHistory.length - 1;
         renderNav2Logs();
     } else {
-        // Refresh the timestamp of the current repeated message.
         previous.ts = entry.ts;
         nav2LogIndex = nav2LogHistory.length - 1;
         renderNav2Logs();
@@ -399,9 +389,9 @@ function onNav2GoalStatusMsg(msg) {
     applyNav2Status();
 }
 const mapCanvasOff = document.createElement('canvas');
-let odom = null;                   // {speed}
-let odomPose = null;               // pose straight from /odom (odom frame)
-let robot = null;                  // best pose estimate, in the map frame when TF allows
+let odom = null;
+let odomPose = null;
+let robot = null;
 let poseDirty = false;
 let baseFrame = 'base_link';
 let currentCmdVel = { linear: 0, angular: 0 };
@@ -431,14 +421,13 @@ function clearNavLoading() {
     }
 }
 
-// If Nav2 never publishes a /plan after we send a goal, give up and abort.
 function startNavWatchdog() {
     if (navInitTimeout) clearTimeout(navInitTimeout);
     navInitTimeout = setTimeout(async () => {
         navInitTimeout = null;
         clearNavLoading();
         if (nav2StatusFresh() && (nav2GoalStatusCode === 'EXECUTING' || nav2GoalStatusCode === 'ACCEPTED')) {
-            return; // Nav2 itself says the goal is still live - trust it over the /plan heuristic.
+            return;
         }
         navStatus = 'Aborted';
         missionGoal = null;
@@ -464,7 +453,7 @@ function yawFromQuat(q) {
 }
 
 function toInt8Array(d) {
-    if (typeof d === 'string') {                     // rosbridge may base64-encode byte arrays
+    if (typeof d === 'string') {
         const bin = atob(d), a = new Int8Array(bin.length);
         for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
         return a;
@@ -473,7 +462,7 @@ function toInt8Array(d) {
 }
 
 // =====================================================================
-//  ROS 2 BRIDGE (rosbridge_websocket via roslib)
+//  ROS 2 BRIDGE
 // =====================================================================
 let ros = null, rosConnected = false, rosTopics = [], joyTopic = null, rosRetryTimer = null;
 let lastMapAt = 0, rosConnectedAt = 0;
@@ -492,7 +481,6 @@ function rosSubscribe(name, type, cb, opts) {
     return t;
 }
 
-// ----- TF: keep a small child->parent table and resolve base_link in the map frame -----
 const tfEdges = new Map();
 const stripSlash = (s) => String(s || '').replace(/^\/+/, '');
 
@@ -520,7 +508,7 @@ function lookupInMap(frame) {
     }
     if (f !== MAP_FRAME) return null;
     let x = 0, y = 0, yaw = 0;
-    for (let i = chain.length - 1; i >= 0; i--) {     // compose map -> ... -> frame (planar)
+    for (let i = chain.length - 1; i >= 0; i--) {
         const e = chain[i], c = Math.cos(yaw), s = Math.sin(yaw);
         x += c * e.x - s * e.y;
         y += s * e.x + c * e.y;
@@ -537,7 +525,6 @@ function refreshRobotPose() {
     needsDraw = true;
 }
 
-// ----- Local / global costmaps (nav_msgs/OccupancyGrid), rendered as toggleable overlays with Foxglove-style colormap -----
 let latestLocalCostmap = null, latestGlobalCostmap = null;
 let localCostmapDirty = false, globalCostmapDirty = false;
 const localCostmapCanvasOff = document.createElement('canvas');
@@ -545,7 +532,7 @@ const globalCostmapCanvasOff = document.createElement('canvas');
 
 function getCostmapColor(v) {
     if (v <= 0 || v === 255 || v === -1) return [0, 0, 0, 0];
-    if (v >= 100) return [227, 0, 53, 220]; // Lethal obstacle (bright red)
+    if (v >= 100) return [227, 0, 53, 220];
     const t = Math.min(v, 99) / 99;
     let r, g, b;
     if (t < 0.33) {
@@ -1141,9 +1128,6 @@ function drawMap() {
     }
 }
 
-// Small pill tag next to the location arrow with the live Nav2 stage
-// (e.g. "Navigating", "Recovering: Spin", "Aborted"). Drawn upright,
-// independent of the robot's heading rotation.
 function drawNav2StageTag(ctx, x, y, r) {
     const label = nav2Stage || navStatus;
     if (!label || label === 'Idle') return;
@@ -1171,9 +1155,6 @@ function drawNav2StageTag(ctx, x, y, r) {
     ctx.restore();
 }
 
-// Speech-bubble showing the exact terminal error/warning text from the
-// last relevant Nav2 node (bt_navigator, controller_server, etc.), sourced
-// from /rosout, anchored above the robot arrow while it's still fresh.
 function drawNav2ErrorBubble(ctx, x, y, r) {
     if (!nav2LastError) return;
     const age = Date.now() - nav2LastError.ts;
@@ -1194,7 +1175,6 @@ function drawNav2ErrorBubble(ctx, x, y, r) {
     const boxH = 20 + lines.length * lineH;
     const bx = x - boxW / 2, by = y - r * 2 - boxH - 14;
 
-    // Fade out over the last 2s of its lifetime.
     const alpha = age > NAV2_ERROR_BUBBLE_MS - 2000 ? Math.max(0, (NAV2_ERROR_BUBBLE_MS - age) / 2000) : 1;
     ctx.globalAlpha = alpha;
 
@@ -1203,7 +1183,6 @@ function drawNav2ErrorBubble(ctx, x, y, r) {
     roundRectPath(ctx, bx, by, boxW, boxH, 8);
     ctx.fill(); ctx.stroke();
 
-    // Pointer tail toward the robot.
     ctx.beginPath();
     ctx.moveTo(x - 7, by + boxH);
     ctx.lineTo(x + 7, by + boxH);
@@ -1620,7 +1599,120 @@ async function sendAbort() {
 }
 
 // =====================================================================
-//  Save map
+//  Emergency controls (top-right of the SLAM map panel)
+// =====================================================================
+
+// Emergency ABORT — stops Nav2 immediately, cancels goals, zeroes cmd_vel.
+// Guards against double-clicks and cleans up all UI state so the user
+// can immediately issue a new goal afterwards.
+async function emergencyAbort() {
+    const btn = document.getElementById('emergency-abort-btn');
+    const homeBtn = document.getElementById('emergency-home-btn');
+
+    if (!window.confirm('ABORT the current mission?\n\nThis immediately cancels Nav2 and stops the rover.')) {
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+    if (homeBtn) homeBtn.disabled = true;
+
+    // Immediately clear client-side navigation state (don't wait for the API).
+    clearNavLoading();
+    navStatus = 'Aborted';
+    missionGoal = null;
+    latestPlan = [];
+    ignorePlansUntil = Date.now() + 1500;
+    nav2GoalStatusCode = null;
+    nav2ActiveNode = null;
+    nav2Stage = 'Aborted';
+    needsDraw = true;
+
+    // Also stop the joystick if it's active, so nothing keeps publishing.
+    if (joyEnabled) {
+        try { window.toggleJoyEnable(); } catch (_) {}
+    }
+    // Publish a zero Twist directly to /cmd_vel_joy as well.
+    try { publishJoyRaw(0, 0); } catch (_) {}
+
+    try {
+        await postJSON('/abort');
+        notify('WARNING', 'EMERGENCY ABORT — mission cancelled.');
+    } catch (e) {
+        notify('ERROR', 'Abort request failed: ' + e.message);
+    } finally {
+        setTimeout(() => {
+            if (btn) btn.disabled = false;
+            if (homeBtn) homeBtn.disabled = false;
+        }, 800);
+    }
+}
+
+// Emergency RETURN TO HOME — cancels any active mission, then sends
+// a NavigateToPose goal back to the map origin (0, 0, yaw 0).
+async function emergencyReturnHome() {
+    const btn = document.getElementById('emergency-home-btn');
+    const abortBtn = document.getElementById('emergency-abort-btn');
+
+    if (!window.confirm('RETURN TO HOME?\n\nThe rover will cancel its current mission and drive back to map origin (0, 0, 0°).')) {
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+    if (abortBtn) abortBtn.disabled = true;
+
+    try {
+        // 1) Cancel whatever Nav2 is currently doing.
+        clearNavLoading();
+        navStatus = 'Aborted';
+        missionGoal = null;
+        latestPlan = [];
+        ignorePlansUntil = Date.now() + 1500;
+        nav2GoalStatusCode = null;
+        nav2ActiveNode = null;
+        nav2Stage = null;
+        needsDraw = true;
+
+        try { await postJSON('/abort'); } catch (_) { /* keep going — we still want to send the home goal */ }
+
+        // 2) Give Nav2 a moment to settle after cancellation, then send the home goal.
+        await new Promise((r) => setTimeout(r, 700));
+
+        // 3) Send the goal at map origin with yaw = 0.
+        setNavLoading(document.getElementById('nav-pose-btn'));
+        startNavWatchdog();
+        navStatus = 'Planning';
+        missionGoal = { x: 0, y: 0 };
+        nav2GoalStatusCode = null;
+        nav2ActiveNode = null;
+        nav2Stage = null;
+        nav2LastError = null;
+
+        await postJSON('/navigate_to_pose', { x: 0, y: 0, yaw_deg: 0 });
+
+        // 4) Reflect the target in the UI so it's visible on the map.
+        updateUIInputs(0, 0, 0);
+        singleTarget = { x: 0, y: 0, yaw: 0 };
+        needsDraw = true;
+
+        notify('INFO', 'Returning to home (map origin 0, 0).');
+    } catch (e) {
+        clearNavLoading();
+        navStatus = 'Idle';
+        missionGoal = null;
+        notify('ERROR', 'Return to home failed: ' + e.message);
+    } finally {
+        setTimeout(() => {
+            if (btn) btn.disabled = false;
+            if (abortBtn) abortBtn.disabled = false;
+        }, 800);
+    }
+}
+
+window.emergencyAbort = emergencyAbort;
+window.emergencyReturnHome = emergencyReturnHome;
+
+// =====================================================================
+//  Save Map (to disk) + Load Map (from upload)
 // =====================================================================
 function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
@@ -1630,36 +1722,354 @@ function downloadBlob(blob, filename) {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-async function saveCurrentMap() {
-    const input = document.getElementById('map-name-input');
-    const mapName = ((input && input.value) || 'small_warehouse').trim().replace(/[^\w.\-]+/g, '_') || 'map';
-    const url = REST_API_BASE + '/map/save?name=' + encodeURIComponent(mapName);
-    notify('INFO', 'Saving map "' + mapName + '" on the rover…');
+// --- Save Map dialog --------------------------------------------------
+
+let saveMapDialogEl = null;
+let loadMapDialogEl = null;
+
+function openSaveMapDialog() {
+    saveMapDialogEl = document.getElementById('save-map-dialog');
+    const nameInput = document.getElementById('save-map-name');
+    const status = document.getElementById('save-map-status');
+    if (!saveMapDialogEl) return;
+
+    const current = (document.getElementById('map-name-input') || {}).value || 'small_warehouse';
+    nameInput.value = current;
+    status.textContent = '';
+    saveMapDialogEl.hidden = false;
+    setTimeout(() => nameInput.focus(), 0);
+}
+
+function closeSaveMapDialog() {
+    if (saveMapDialogEl) saveMapDialogEl.hidden = true;
+}
+
+async function checkMapExists(name) {
     try {
-        const res = await fetch(url);
-        if (!res.ok) {
-            let detail = '';
-            try { const j = await res.json(); detail = j.detail || j.message || ''; } catch (_) {}
-            throw new Error(detail || ('HTTP ' + res.status));
-        }
-        const blob = await res.blob();
-        const cd = res.headers.get('Content-Disposition') || '';
-        const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
-        downloadBlob(blob, m ? decodeURIComponent(m[1]) : mapName + '.zip');
-        notify('INFO', 'Map "' + mapName + '" saved and downloaded.');
-    } catch (e) {
-        if (e instanceof TypeError) {
-            notify('WARNING', 'Direct fetch was blocked - asking the browser to download the map instead.');
-            const f = document.createElement('iframe');
-            f.style.display = 'none'; f.src = url;
-            document.body.appendChild(f);
-            setTimeout(() => f.remove(), 30000);
-        } else {
-            notify('ERROR', 'Save map failed: ' + e.message);
-        }
+        const res = await fetch(REST_API_BASE + '/map/exists?name=' + encodeURIComponent(name));
+        if (!res.ok) return false;
+        const data = await res.json();
+        return !!data.exists;
+    } catch (_) {
+        return false;
     }
 }
 
+// Build a PGM (P5) binary blob from the latest live map.
+function buildPGMBlobFromLiveMap(m) {
+    const header = 'P5\n# CREATOR: Milusions WareGV Suite\n' + m.w + ' ' + m.h + '\n255\n';
+    const headerBytes = new TextEncoder().encode(header);
+    const gray = new Uint8Array(m.w * m.h);
+    for (let j = 0; j < m.h; j++) {
+        for (let i = 0; i < m.w; i++) {
+            const v = m.data[j * m.w + i];
+            let g = 205;
+            if (v >= 0) g = v >= 65 ? 0 : (v <= 25 ? 254 : 205);
+            gray[(m.h - 1 - j) * m.w + i] = g;
+        }
+    }
+    const out = new Uint8Array(headerBytes.length + gray.length);
+    out.set(headerBytes, 0);
+    out.set(gray, headerBytes.length);
+    return new Blob([out], { type: 'image/x-portable-graymap' });
+}
+
+async function confirmSaveMap() {
+    const nameInput = document.getElementById('save-map-name');
+    const status = document.getElementById('save-map-status');
+    const confirmBtn = document.getElementById('save-map-confirm');
+    const rawName = (nameInput.value || '').trim();
+
+    if (!rawName) {
+        status.textContent = 'Please enter a map name.';
+        return;
+    }
+
+    const safeName = rawName.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^[._]+|[._]+$/g, '');
+    if (!safeName) {
+        status.textContent = 'That name contains no valid characters.';
+        return;
+    }
+
+    status.textContent = 'Checking if the map already exists…';
+    const exists = await checkMapExists(safeName);
+    if (exists) {
+        const proceed = window.confirm(
+            'A map named "' + safeName + '" already exists in the maps folder.\n\n' +
+            'Overwrite it?'
+        );
+        if (!proceed) {
+            status.textContent = 'Save cancelled — choose a different name.';
+            return;
+        }
+    }
+
+    // Grab the current live map as a PGM.
+    if (!latestMap) {
+        status.textContent = 'No live map data to save yet.';
+        return;
+    }
+    const pgmBlob = buildPGMBlobFromLiveMap(latestMap);
+
+    // Build a matching YAML so the download is a complete, Nav2-ready map.
+    const yamlBlob = buildYamlBlobForLiveMap(latestMap, safeName);
+
+    const form = new FormData();
+    form.append('name', safeName);
+    form.append('overwrite', exists ? 'true' : 'false');
+    form.append('pgm', pgmBlob, safeName + '.pgm');
+
+    confirmBtn.disabled = true;
+    confirmBtn.classList.add('loading');
+    status.textContent = 'Saving map on the rover…';
+
+    let savedOnRover = false;
+
+    // 1) Save on the rover's disk (via the REST endpoint).
+    try {
+        const res = await fetch(REST_API_BASE + '/map/save_to_disk', {
+            method: 'POST',
+            body: form
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || ('HTTP ' + res.status));
+        }
+        savedOnRover = true;
+        status.textContent = 'Saved on rover at ' + (data.directory || safeName) + '.';
+        notify('INFO', 'Map "' + safeName + '" saved on the rover.');
+        await loadMapNames();
+    } catch (e) {
+        status.textContent = 'Rover save failed: ' + e.message;
+        notify('ERROR', 'Save map failed on rover: ' + e.message);
+    }
+
+    // 2) Also trigger a local download of the .pgm + .yaml (as a .zip),
+    //    regardless of whether the rover-side save succeeded.
+    try {
+        const zipBlob = await buildMapZipBlob(safeName, pgmBlob, yamlBlob);
+        downloadBlob(zipBlob, safeName + '.zip');
+        status.textContent = (savedOnRover ? 'Saved on rover. ' : '') +
+            'Downloaded "' + safeName + '.zip" to your computer.';
+        if (savedOnRover) {
+            notify('INFO', 'Map "' + safeName + '" also downloaded to your computer.');
+        } else {
+            notify('WARNING', 'Map downloaded locally, but the rover save failed.');
+        }
+    } catch (e) {
+        status.textContent = (savedOnRover ? 'Saved on rover. ' : '') +
+            'Local download failed: ' + e.message;
+        notify('ERROR', 'Local map download failed: ' + e.message);
+    }
+
+    confirmBtn.disabled = false;
+    confirmBtn.classList.remove('loading');
+
+    // Close the dialog once we're done.
+    setTimeout(closeSaveMapDialog, 1200);
+}
+
+// Build a matching YAML for the live map. Mirrors what the backend writes
+// when no YAML is supplied, so the local download is fully self-contained.
+function buildYamlBlobForLiveMap(m, name) {
+    const yamlText =
+        'image: ' + name + '.pgm\n' +
+        'resolution: ' + m.res.toFixed(6) + '\n' +
+        'origin: [' + m.ox.toFixed(6) + ', ' + m.oy.toFixed(6) + ', 0.000000]\n' +
+        'negate: 0\n' +
+        'occupied_thresh: 0.65\n' +
+        'free_thresh: 0.196\n';
+    return new Blob([yamlText], { type: 'text/yaml' });
+}
+
+// Minimal in-browser ZIP writer (STORE only, no compression).
+// Enough for shipping a couple of small files; avoids pulling in a library.
+async function buildMapZipBlob(name, pgmBlob, yamlBlob) {
+    const enc = new TextEncoder();
+    const pgmBytes = new Uint8Array(await pgmBlob.arrayBuffer());
+    const yamlBytes = new Uint8Array(await yamlBlob.arrayBuffer());
+
+    const files = [
+        { name: name + '.pgm', data: pgmBytes },
+        { name: name + '.yaml', data: yamlBytes }
+    ];
+
+    const chunks = [];
+    const central = [];
+    let offset = 0;
+
+    // CRC32 helper (standard polynomial).
+    const crcTable = (() => {
+        const t = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            t[n] = c >>> 0;
+        }
+        return t;
+    })();
+    const crc32 = (bytes) => {
+        let c = 0xFFFFFFFF;
+        for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+        return (c ^ 0xFFFFFFFF) >>> 0;
+    };
+
+    // DOS date/time.
+    const now = new Date();
+    const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+    const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+
+    for (const f of files) {
+        const nameBytes = enc.encode(f.name);
+        const crc = crc32(f.data);
+        const size = f.data.length;
+
+        // Local file header (30 bytes + name).
+        const lh = new Uint8Array(30 + nameBytes.length);
+        const lv = new DataView(lh.buffer);
+        lv.setUint32(0, 0x04034b50, true);   // signature
+        lv.setUint16(4, 20, true);           // version needed
+        lv.setUint16(6, 0, true);            // flags
+        lv.setUint16(8, 0, true);            // method (STORE)
+        lv.setUint16(10, dosTime, true);
+        lv.setUint16(12, dosDate, true);
+        lv.setUint32(14, crc, true);
+        lv.setUint32(18, size, true);
+        lv.setUint32(22, size, true);
+        lv.setUint16(26, nameBytes.length, true);
+        lv.setUint16(28, 0, true);           // extra length
+        lh.set(nameBytes, 30);
+
+        chunks.push(lh, f.data);
+
+        // Central directory record.
+        const ch = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(ch.buffer);
+        cv.setUint32(0, 0x02014b50, true);   // signature
+        cv.setUint16(4, 20, true);           // version made by
+        cv.setUint16(6, 20, true);           // version needed
+        cv.setUint16(8, 0, true);
+        cv.setUint16(10, 0, true);           // STORE
+        cv.setUint16(12, dosTime, true);
+        cv.setUint16(14, dosDate, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, size, true);
+        cv.setUint32(24, size, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint16(30, 0, true);           // extra
+        cv.setUint16(32, 0, true);           // comment
+        cv.setUint16(34, 0, true);           // disk start
+        cv.setUint16(36, 0, true);           // internal attrs
+        cv.setUint32(38, 0, true);           // external attrs
+        cv.setUint32(42, offset, true);      // local header offset
+        ch.set(nameBytes, 46);
+        central.push(ch);
+
+        offset += lh.length + size;
+    }
+
+    // End of central directory.
+    const cdSize = central.reduce((s, c) => s + c.length, 0);
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, files.length, true);
+    ev.setUint16(10, files.length, true);
+    ev.setUint32(12, cdSize, true);
+    ev.setUint32(16, offset, true);
+    ev.setUint16(20, 0, true);
+
+    return new Blob([...chunks, ...central, eocd], { type: 'application/zip' });
+}
+
+// --- Load Map dialog --------------------------------------------------
+
+function openLoadMapDialog() {
+    loadMapDialogEl = document.getElementById('load-map-dialog');
+    if (!loadMapDialogEl) return;
+    document.getElementById('load-map-name').value = '';
+    document.getElementById('load-map-pgm').value = '';
+    document.getElementById('load-map-yaml').value = '';
+    document.getElementById('load-map-overwrite').checked = false;
+    document.getElementById('load-map-status').textContent = '';
+    loadMapDialogEl.hidden = false;
+}
+
+function closeLoadMapDialog() {
+    if (loadMapDialogEl) loadMapDialogEl.hidden = true;
+}
+
+async function confirmLoadMap() {
+    const nameInput = document.getElementById('load-map-name');
+    const pgmInput = document.getElementById('load-map-pgm');
+    const yamlInput = document.getElementById('load-map-yaml');
+    const overwriteInput = document.getElementById('load-map-overwrite');
+    const status = document.getElementById('load-map-status');
+    const confirmBtn = document.getElementById('load-map-confirm');
+
+    const rawName = (nameInput.value || '').trim();
+    if (!rawName) { status.textContent = 'Please enter a map name.'; return; }
+    const safeName = rawName.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^[._]+|[._]+$/g, '');
+    if (!safeName) { status.textContent = 'That name contains no valid characters.'; return; }
+
+    if (!pgmInput.files || !pgmInput.files.length) {
+        status.textContent = 'Please choose a .pgm (or image) file.';
+        return;
+    }
+
+    const exists = await checkMapExists(safeName);
+    if (exists && !overwriteInput.checked) {
+        status.textContent = 'That map already exists. Tick "Overwrite" to replace it.';
+        return;
+    }
+
+    const form = new FormData();
+    form.append('name', safeName);
+    form.append('overwrite', overwriteInput.checked ? 'true' : 'false');
+    form.append('pgm', pgmInput.files[0], safeName + '.pgm');
+    if (yamlInput.files && yamlInput.files.length) {
+        form.append('yaml', yamlInput.files[0], safeName + '.yaml');
+    }
+
+    confirmBtn.disabled = true;
+    confirmBtn.classList.add('loading');
+    status.textContent = 'Uploading…';
+
+    try {
+        const res = await fetch(REST_API_BASE + '/map/load', {
+            method: 'POST',
+            body: form
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+        status.textContent = 'Stored at ' + (data.directory || safeName) + '.';
+        notify('INFO', 'Map "' + safeName + '" uploaded to the rover.');
+        await loadMapNames();
+        setTimeout(closeLoadMapDialog, 900);
+    } catch (e) {
+        status.textContent = 'Upload failed: ' + e.message;
+        notify('ERROR', 'Load map failed: ' + e.message);
+    } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.classList.remove('loading');
+    }
+}
+
+window.openSaveMapDialog = openSaveMapDialog;
+window.closeSaveMapDialog = closeSaveMapDialog;
+window.confirmSaveMap = confirmSaveMap;
+window.openLoadMapDialog = openLoadMapDialog;
+window.closeLoadMapDialog = closeLoadMapDialog;
+window.confirmLoadMap = confirmLoadMap;
+
+// Backwards-compatible save.
+async function saveCurrentMap() {
+    openSaveMapDialog();
+}
+
+// =====================================================================
+//  Map name list
+// =====================================================================
 function extractMapNames(data) {
     const values = Array.isArray(data) ? data
         : data && (data.maps || data.map_names || data.names || data.items) || [];
@@ -1790,8 +2200,6 @@ let joyEnabled = false;
 
 function clamp(val, lo, hi) { return Math.min(hi, Math.max(lo, val)); }
 
-// Max linear/angular speed come from the user-editable fields; clamped to a
-// sane non-negative range so a bad/blank input can't send an unbounded command.
 function getJoyMaxVel() {
     const v = parseFloat(joyMaxVelInput && joyMaxVelInput.value);
     return clamp(Number.isFinite(v) ? v : 0, 0, 5);
@@ -1804,8 +2212,6 @@ function getJoyMaxAng() {
 function publishJoyRaw(turn, fwd) {
     if (!joyTopic || !rosConnected) return false;
     const maxVel = getJoyMaxVel(), maxAng = getJoyMaxAng();
-    // turn/fwd are normalized joystick axes in [-1, 1]; scale by the user's
-    // max speeds and clip in-browser before publishing to /cmd_vel_joy.
     const linX = clamp(fwd, -1, 1) * maxVel;
     const angZ = clamp(turn, -1, 1) * maxAng;
     joyTopic.publish(new ROSLIB.Message({
@@ -2481,9 +2887,6 @@ function renderTranscript() {
     }
     el.classList.toggle('show', !!(input || outputTranscript));
 
-    // Text override field: only offered while Helio is quietly listening and
-    // no speech has been picked up yet — hidden the moment you start talking
-    // or while Helio itself is thinking/speaking.
     if (typeRow) {
         const showType = helioOpen && agentState === 'listening' && !input;
         typeRow.classList.toggle('show', showType);
@@ -2602,10 +3005,10 @@ function commitTranscript() {
     recognitionStop();
     interimText = ''; transcriptText = '';
     confidenceSum = 0; confidenceCount = 0;
-    
+
     notifyHelioState('listening_stop', 'thinking', '', '');
     notifyHelioState('input_received', 'thinking', text, '');
-    
+
     renderTranscript();
     appendHistory('you', text);
     handleCommand(text);
@@ -2620,7 +3023,7 @@ function bindRecognition() {
     recognition.lang = BASE_SPEECH_LANG;
 
     recognition.onstart = () => {
-        if (!helioOpen) return; // wake mode: listening silently, no UI change
+        if (!helioOpen) return;
         agentState = 'listening';
         speechActive = true;
         notifyHelioState('listening_start', 'listening', '', '');
@@ -2633,7 +3036,6 @@ function bindRecognition() {
         recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
 
         if (!helioOpen) {
-            // WAKE MODE: same engine, just checking for either wake word.
             for (let i = event.resultIndex; i < event.results.length; i += 1) {
                 const heard = ((event.results[i][0] && event.results[i][0].transcript) || '').toLowerCase();
                 if (!heard) continue;
@@ -2660,7 +3062,7 @@ function bindRecognition() {
         }
         interimText = currentInterim;
         notifyHelioState('listening_update', 'listening', pendingText(), '');
-        
+
         applyDetectedLanguage([transcriptText, interimText].join(' '));
         speechActive = true;
         setVoiceStatus('LISTENING CONTINUOUSLY', true);
@@ -2740,7 +3142,7 @@ function openVoiceModal() {
         alert('Continuous speech recognition is not supported in this browser. Use Chrome or Edge.');
         return;
     }
-    wakeBlocked = false; // a direct tap is a valid user gesture — always worth retrying mic access
+    wakeBlocked = false;
     updateWakeBtn();
     activateHelio();
 }
@@ -2749,7 +3151,7 @@ function activateHelio(greeting) {
     recognitionStop();
     helioOpen = true;
     notifyHelioState('helio_on', 'waking', '', 'helio_wake');
-    
+
     if (modal) { modal.classList.add('active'); modal.setAttribute('aria-hidden', 'false'); }
     const hist = document.getElementById('modal-history-column'); if (hist) hist.classList.remove('show');
     PeekController.stop();
@@ -2777,7 +3179,7 @@ function closeVoiceModal() {
     agentState = 'idle';
     speechActive = false;
     notifyHelioState('helio_off', 'idle', '', '');
-    
+
     commandSeq += 1;
     clearVoiceTimers();
     recognitionStop();
@@ -2835,18 +3237,18 @@ function speakText(text, opts) {
 
     return chunks.reduce((chain, chunk, i) => chain.then(() => new Promise((resolve) => {
         if (!helioOpen && !opts.forceIntro) { resolve(); return; }
-        
+
         notifyHelioState('speaking_start', 'speaking', chunk, '');
-        
+
         let finished = false, wd = null;
-        const finish = () => { 
-            if (finished) return; 
-            finished = true; 
-            clearTimeout(wd); 
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(wd);
             notifyHelioState('speaking_end', 'idle', chunk, '');
-            resolve(); 
+            resolve();
         };
-        
+
         const u = new SpeechSynthesisUtterance(chunk);
         u.lang = lang;
         if (voice) u.voice = voice;
@@ -2881,12 +3283,12 @@ async function handleCommand(text) {
 
     const answer = (reply && reply.text) || 'Done.';
     if (reply && reply.failed) playErrorSound();
-    
+
     notifyHelioState('output_generated', 'speaking', answer, '');
     appendHistory('agent', answer);
     outputTranscript = answer;
     renderTranscript();
-    
+
     agentState = 'speaking';
     setVoiceStatus();
     setFace('speaking');
@@ -3040,6 +3442,13 @@ async function localAssistant(raw) {
     const has = (re) => re.test(t);
     const nums = numbersIn(t);
 
+    // --- Emergency: return to home ---
+    if (has(/\b(return|go|come|drive|head)\b.*\b(home|origin|start|base)\b/) ||
+        has(/\bhome\b.*\b(position|pose|point)\b/)) {
+        await emergencyReturnHome();
+        return { text: 'Returning to home at map origin.' };
+    }
+
     if (has(/\b(abort|cancel|halt|emergency|stop)\b/) && !has(/\bstop (the )?joystick\b/)) {
         await sendAbort();
         return { text: 'Mission aborted.' };
@@ -3080,10 +3489,12 @@ async function localAssistant(raw) {
         return { text: 'Navigating to the selected target.' };
     }
     if (has(/\bsave\b.*\bmap\b/)) {
-        const m = /\b(?:as|named|called)\s+([\w\-]+)/.exec(t);
-        if (m) document.getElementById('map-name-input').value = m[1];
-        await saveCurrentMap();
-        return { text: 'Saving the map.' };
+        openSaveMapDialog();
+        return { text: 'Opening the save map dialog. Enter a name to confirm.' };
+    }
+    if (has(/\b(load|upload)\b.*\bmap\b/)) {
+        openLoadMapDialog();
+        return { text: 'Opening the load map dialog. Choose your files to upload.' };
     }
     if (has(/\b(view|open|show)\b.*\bmap\b/)) {
         openMapViewer();
@@ -3102,7 +3513,7 @@ async function localAssistant(raw) {
     if (has(/\b(status|where|position|location|report|speed|how far|distance)\b/)) return { text: statusReport() };
     if (has(/\b(hello|hi|hey|namaste)\b/)) return { text: 'Hello! I am Helio. Tell me where to drive the rover.' };
     if (has(/\b(help|what can you do)\b/)) {
-        return { text: 'You can say: go to x 2 y 3, follow waypoints, abort, save map, view map, enable joystick, or status.' };
+        return { text: 'You can say: go to x 2 y 3, follow waypoints, abort, return home, save map, load map, view map, enable joystick, or status.' };
     }
     return { text: UNRECOGNIZED_LOCAL_REPLY };
 }
@@ -3111,7 +3522,6 @@ async function localAssistant(raw) {
 //  Wake word
 // =====================================================================
 const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
-// Fuzzy phonetic variants so mispronunciation / misrecognition still triggers the wake word.
 const WAKE_PATTERNS = {
     robot: /\b(he?y|hi|okay|ok)?\s*(robot|robo|robut|ro-?bot|rowbot|robort|robaut|row\s*bot|robotic|rob it|rob ot|robo t|robert)\b/i,
     jojo: /\b(he?y|hi|okay|ok)?\s*(jojo|jo-?jo|jo\s*jo|joe\s*joe|joejoe|jojoe|jojou|joj-?o|jhojho|jyojyo|jojoy|dojo)\b/i

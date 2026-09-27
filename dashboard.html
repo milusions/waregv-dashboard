@@ -204,22 +204,22 @@
                                 </div>
                             </div>
 
-                            <div class="joy-limits">
-                                <div class="joy-limit">
-                                    <label for="joy-max-vel">Max velocity</label>
-                                    <div class="joy-input-wrap">
-                                        <input id="joy-max-vel" class="field" type="number" step="0.05" min="0" value="0.5">
-                                        <span>m/s</span>
-                                    </div>
-                                </div>
-                                <div class="joy-limit">
-                                    <label for="joy-max-ang">Max angular</label>
-                                    <div class="joy-input-wrap">
-                                        <input id="joy-max-ang" class="field" type="number" step="0.05" min="0" value="1.0">
-                                        <span>rad/s</span>
-                                    </div>
-                                </div>
-                            </div>
+                       <div class="joy-limits">
+    <div class="joy-limit">
+        <label for="joy-max-vel">Max velocity</label>
+        <div class="joy-input-wrap">
+            <input id="joy-max-vel" class="field" type="number" step="0.05" min="0" value="0.3">
+            <span>m/s</span>
+        </div>
+    </div>
+    <div class="joy-limit">
+        <label for="joy-max-ang">Max angular</label>
+        <div class="joy-input-wrap">
+            <input id="joy-max-ang" class="field" type="number" step="0.05" min="0" value="0.35">
+            <span>rad/s</span>
+        </div>
+    </div>
+</div>
                         </div>
                     </div>
                 </section>
@@ -235,6 +235,15 @@
                             title="Keep the rover centred">Follow</button>
                         <button class="tool-btn" onclick="clearMarkers()"
                             title="Remove target and waypoint markers">Clear</button>
+                        <span class="tool-sep"></span>
+                        <button class="tool-btn emergency-abort" id="emergency-abort-btn" type="button"
+                            onclick="emergencyAbort()" title="Immediately stop Nav2 (abort mission)">
+                             ABORT
+                        </button>
+                        <button class="tool-btn emergency-home" id="emergency-home-btn" type="button"
+                            onclick="emergencyReturnHome()" title="Cancel current mission and drive back to map origin (0, 0, 0°)">
+                            Return To Home
+                        </button>
                     </div>
                 </div>
                 <div class="panel-body">
@@ -340,22 +349,24 @@
             <div class="col-ctrl">
                 <!-- CAMERA: RGB and Depth as two separate panels -->
                 <section class="panel camera-panel-rgb" style="flex: 0 0 160px; min-height: 160px;">
-                    <div class="panel-hd"><span>Camera · RGB</span></div>
-                    <div class="panel-body" style="padding: 8px; min-height: 0; overflow: hidden;">
-                        <div style="width: 100%; height: 100%; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                            <img id="cam-rgb" style="width: 100%; height: 100%; object-fit: contain; display: block;" alt="RGB feed">
-                        </div>
-                    </div>
-                </section>
+    <div class="panel-hd"><span>Camera · RGB</span></div>
+    <div class="panel-body" style="padding: 8px; min-height: 0; overflow: hidden;">
+        <div class="cam-viewport">
+            <img id="cam-rgb" class="cam-feed" alt="RGB feed">
+            <div id="cam-rgb-empty" class="cam-empty">No camera feed</div>
+        </div>
+    </div>
+</section>
 
                 <section class="panel camera-panel-depth" style="flex: 0 0 160px; min-height: 160px;">
-                    <div class="panel-hd"><span>Camera · Depth</span></div>
-                    <div class="panel-body" style="padding: 8px; min-height: 0; overflow: hidden;">
-                        <div style="width: 100%; height: 100%; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                            <img id="cam-depth" style="width: 100%; height: 100%; object-fit: contain; display: block;" alt="Depth feed">
-                        </div>
-                    </div>
-                </section>
+    <div class="panel-hd"><span>Camera · Depth</span></div>
+    <div class="panel-body" style="padding: 8px; min-height: 0; overflow: hidden;">
+        <div class="cam-viewport">
+            <img id="cam-depth" class="cam-feed" alt="Depth feed">
+            <div id="cam-depth-empty" class="cam-empty">No camera feed</div>
+        </div>
+    </div>
+</section>
 
                 <aside class="panel ctrl-panel">
                     <div class="panel-hd"><span>System Mode</span></div>
@@ -376,10 +387,13 @@
                                     <div class="btn-row">
                                         <button class="btn btn-primary" id="deploy-btn"
                                             onclick="applySystemMode()">Deploy Mode</button>
-                                        <button class="btn btn-success" onclick="run(this, saveCurrentMap)">Save
+                                        <button class="btn btn-success" onclick="openSaveMapDialog()">Save
                                             Map</button>
                                         <button class="btn btn-secondary" onclick="openMapViewer()"
                                             title="Open the map viewer">View Map</button>
+                                    </div>
+                                    <div class="btn-row">
+                                        <button class="btn btn-secondary" onclick="openLoadMapDialog()">Load Map</button>
                                     </div>
                                 </div>
                             </div>
@@ -441,6 +455,74 @@
             </div>
             <div class="mv-body" id="mv-body"><canvas id="mv-canvas"></canvas></div>
             <div class="mv-foot" id="mv-hint">Drag to pan · wheel to zoom · press Measure (or M) to measure distances.
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Map dialog: asks for a name before saving -->
+    <div id="save-map-dialog" class="map-manager-modal" hidden role="dialog" aria-modal="true"
+        aria-label="Save map">
+        <div class="map-manager-card">
+            <div class="map-manager-head">
+                <div>
+                    <div class="map-manager-title">Save Map</div>
+                    <div class="map-manager-sub">Saved to: waregv_mapping/maps/&lt;name&gt;/</div>
+                </div>
+                <button class="map-manager-close" type="button" onclick="closeSaveMapDialog()"
+                    aria-label="Close">&times;</button>
+            </div>
+            <div class="map-manager-body">
+                <label class="map-manager-label" for="save-map-name">Map name</label>
+                <input id="save-map-name" class="ip-input" type="text"
+                    placeholder="e.g. small_warehouse" autocomplete="off" />
+                <div id="save-map-status" class="map-manager-error"></div>
+            </div>
+            <div class="map-manager-foot">
+                <button class="btn btn-secondary" type="button"
+                    onclick="closeSaveMapDialog()">Cancel</button>
+                <button class="btn btn-success" id="save-map-confirm" type="button"
+                    onclick="confirmSaveMap()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load Map dialog: upload PGM + optional YAML under a chosen name -->
+    <div id="load-map-dialog" class="map-manager-modal" hidden role="dialog" aria-modal="true"
+        aria-label="Load map">
+        <div class="map-manager-card">
+            <div class="map-manager-head">
+                <div>
+                    <div class="map-manager-title">Load Map</div>
+                    <div class="map-manager-sub">Upload into: waregv_mapping/maps/&lt;name&gt;/</div>
+                </div>
+                <button class="map-manager-close" type="button" onclick="closeLoadMapDialog()"
+                    aria-label="Close">&times;</button>
+            </div>
+            <div class="map-manager-body">
+                <label class="map-manager-label" for="load-map-name">Map name</label>
+                <input id="load-map-name" class="ip-input" type="text"
+                    placeholder="e.g. small_warehouse" autocomplete="off" />
+
+                <label class="map-manager-label" for="load-map-pgm">Map image (.pgm / .png)</label>
+                <input id="load-map-pgm" class="map-file-input" type="file"
+                    accept=".pgm,.png,.jpg,.jpeg" />
+
+                <label class="map-manager-label" for="load-map-yaml">Map YAML (.yaml, optional)</label>
+                <input id="load-map-yaml" class="map-file-input" type="file"
+                    accept=".yaml,.yml" />
+
+                <label class="map-manager-label" style="display:flex;align-items:center;gap:6px;font-weight:600;">
+                    <input id="load-map-overwrite" type="checkbox" style="margin:0;">
+                    Overwrite if it already exists
+                </label>
+
+                <div id="load-map-status" class="map-manager-error"></div>
+            </div>
+            <div class="map-manager-foot">
+                <button class="btn btn-secondary" type="button"
+                    onclick="closeLoadMapDialog()">Cancel</button>
+                <button class="btn btn-primary" id="load-map-confirm" type="button"
+                    onclick="confirmLoadMap()">Upload</button>
             </div>
         </div>
     </div>

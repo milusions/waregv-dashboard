@@ -1266,3 +1266,122 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     .side > .panel:first-child { flex: none !important; height: auto !important; min-height: 0 !important; }
     .joystick-panel { flex: none !important; height: auto !important; }
 }
+
+
+/* =====================================================================
+   Emergency controls in the SLAM map panel header
+   ===================================================================== */
+.panel-tools .tool-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    margin: 0 3px;
+}
+
+.tool-btn.emergency-abort,
+.tool-btn.emergency-home {
+    height: 24px;
+    padding: 0 10px;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    border-radius: 4px;
+    transition: filter .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+
+.tool-btn.emergency-abort {
+    color: #fff;
+    background: var(--danger);
+    border: 1px solid var(--danger);
+    box-shadow: 0 2px 8px rgba(227, 0, 53, 0.35);
+}
+
+.tool-btn.emergency-abort:hover {
+    color: #fff;
+    border-color: var(--danger);
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(227, 0, 53, 0.5);
+}
+
+.tool-btn.emergency-abort:active { transform: translateY(0); filter: brightness(0.95); }
+
+.tool-btn.emergency-home {
+    color: #fff;
+    background: var(--warning);
+    border: 1px solid var(--warning);
+    box-shadow: 0 2px 8px rgba(232, 163, 23, 0.35);
+}
+
+.tool-btn.emergency-home:hover {
+    color: #fff;
+    border-color: var(--warning);
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(232, 163, 23, 0.5);
+}
+
+.tool-btn.emergency-home:active { transform: translateY(0); filter: brightness(0.95); }
+
+.tool-btn.emergency-abort:disabled,
+.tool-btn.emergency-home:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    filter: none;
+}
+
+@media (max-width: 640px) {
+    .tool-btn.emergency-abort,
+    .tool-btn.emergency-home {
+        font-size: 0.6rem;
+        padding: 0 7px;
+        height: 22px;
+    }
+}
+
+/* =====================================================================
+   Camera feed viewports with "No camera feed" fallback text
+   ===================================================================== */
+.cam-viewport {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    position: relative;
+    background: #000;
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cam-feed {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    /* Hidden until the first successful frame arrives. */
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+/* When the image has successfully loaded at least once, show it and hide
+   the fallback text. The `is-live` class is toggled from JS. */
+.cam-viewport.is-live .cam-feed { opacity: 1; }
+.cam-viewport.is-live .cam-empty { display: none; }
+
+.cam-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-align: center;
+    pointer-events: none;
+    padding: 0 8px;
+}
