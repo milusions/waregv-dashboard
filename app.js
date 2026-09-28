@@ -1710,7 +1710,128 @@ async function emergencyReturnHome() {
 
 window.emergencyAbort = emergencyAbort;
 window.emergencyReturnHome = emergencyReturnHome;
+// =====================================================================
+//  Clear SLAM — drop the map and restart from the rover's current pose
+// =====================================================================
 
+/**
+ * Clears the SLAM map and restarts mapping.
+ *
+ * The rover's current physical location becomes the new map origin
+ * (0, 0, 0). Any active Nav2 mission is cancelled first, and all
+ * local map/path/pose state is reset so the UI shows a fresh slate.
+ */
+async function resetSlam() {
+    const btn = document.getElementById('slam-reset-btn');
+    const abortBtn = document.getElementById('emergency-abort-btn');
+    const homeBtn = document.getElementById('emergency-home-btn');
+
+    if (!window.confirm(
+        'CLEAR SLAM MAP?\n\n' +
+        'This will:\n' +
+        '  • cancel any active Nav2 mission\n' +
+        '  • erase the current SLAM map\n' +
+        '  • restart mapping with the rover\'s current position as the new origin (0, 0, 0)\n\n' +
+        'The rover will NOT move. Continue?'
+    )) {
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+    if (abortBtn) abortBtn.disabled = true;
+    if (homeBtn) homeBtn.disabled = true;
+
+    // Stop the joystick and publish zero velocity so nothing is moving.
+    if (joyEnabled) {
+        try { window.toggleJoyEnable(); } catch (_) {}
+    }
+    try { publishJoyRaw(0, 0); } catch (_) {}
+
+    // ---- Reset client-side UI state up-front -------------------------
+    // This makes the UI feel immediate, then we reconcile with the
+    // server response below.
+    const previousRobot = robot ? { ...robot } : null;
+
+    latestMap = null;
+    latestPlan = [];
+    latestScanPoints = [];
+    latestLocalCostmap = null;
+    latestGlobalCostmap = null;
+    localCostmapDirty = true;
+    globalCostmapDirty = true;
+    mapImageDirty = true;
+    viewFitted = false;
+
+    singleTarget = null;
+    activeGoal = null;
+    waypointsData = [];
+    missionGoal = null;
+    distanceRemaining = null;
+
+    navStatus = 'Idle';
+    nav2GoalStatusCode = null;
+    nav2ActiveNode = null;
+    nav2Stage = null;
+    nav2LastError = null;
+
+    updateWaypointsUI();
+    closePoseActionPopup();
+    clearNavLoading();
+
+    // Reset the robot marker to the origin, since the new map's
+    // origin IS the rover's current physical location.
+    if (previousRobot) {
+        robot = { x: 0, y: 0, yaw: 0 };
+    }
+    odomPose = null;
+    poseDirty = true;
+
+    // Reset the view so the empty map is centered on the origin.
+    view.vx = 0;
+    view.vy = 0;
+    view.s = 30;
+    follow = true;
+    const followButton = document.getElementById('follow-btn');
+    if (followButton) followButton.classList.add('on');
+
+    needsDraw = true;
+
+    const mapEmpty = document.getElementById('map-empty');
+    if (mapEmpty) {
+        mapEmpty.textContent = 'Waiting for the new SLAM map…';
+        mapEmpty.style.display = 'flex';
+    }
+    const mapMeta = document.getElementById('map-meta');
+    if (mapMeta) mapMeta.textContent = '';
+
+    // ---- Call the backend -------------------------------------------
+    try {
+        const data = await postJSON('/slam/reset');
+        if (data && data.ok === false) {
+            notify('WARNING', 'SLAM reset partially applied: ' + (data.detail || 'unknown reason'));
+        } else {
+            notify('INFO', 'SLAM map cleared. Mapping restarted from the rover\'s current position.');
+        }
+
+        // Anchor the UI at the new origin.
+        updateUIInputs(0, 0, 0);
+    } catch (e) {
+        notify('ERROR', 'SLAM reset failed: ' + e.message);
+        // Restore the previous pose so the UI is not stuck at a fake origin.
+        if (previousRobot) {
+            robot = previousRobot;
+            needsDraw = true;
+        }
+    } finally {
+        setTimeout(() => {
+            if (btn) btn.disabled = false;
+            if (abortBtn) abortBtn.disabled = false;
+            if (homeBtn) homeBtn.disabled = false;
+        }, 800);
+    }
+}
+
+window.resetSlam = resetSlam;
 // =====================================================================
 //  Save Map (to disk) + Load Map (from upload)
 // =====================================================================

@@ -1385,3 +1385,49 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
     pointer-events: none;
     padding: 0 8px;
 }
+
+
+/* =====================================================================
+   Clear SLAM button in the SLAM map panel header
+   ===================================================================== */
+.tool-btn.emergency-reset {
+    height: 24px;
+    padding: 0 10px;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    border-radius: 4px;
+    color: #fff;
+    background: #6b4de6;
+    border: 1px solid #6b4de6;
+    box-shadow: 0 2px 8px rgba(107, 77, 230, 0.35);
+    transition: filter .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+
+.tool-btn.emergency-reset:hover {
+    color: #fff;
+    border-color: #6b4de6;
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(107, 77, 230, 0.5);
+}
+
+.tool-btn.emergency-reset:active {
+    transform: translateY(0);
+    filter: brightness(0.95);
+}
+
+.tool-btn.emergency-reset:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    filter: none;
+}
+
+@media (max-width: 640px) {
+    .tool-btn.emergency-reset {
+        font-size: 0.6rem;
+        padding: 0 7px;
+        height: 22px;
+    }
+}

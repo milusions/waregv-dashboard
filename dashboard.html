@@ -230,21 +230,25 @@
                 <div class="panel-hd">
                     <span>SLAM Map 3D <span class="sub" id="map-meta"></span></span>
                     <div class="panel-tools">
-                        <button class="tool-btn" onclick="fitMapView()" title="Fit map to panel">Fit</button>
-                        <button class="tool-btn" id="follow-btn" onclick="toggleFollow()"
-                            title="Keep the rover centred">Follow</button>
-                        <button class="tool-btn" onclick="clearMarkers()"
-                            title="Remove target and waypoint markers">Clear</button>
-                        <span class="tool-sep"></span>
-                        <button class="tool-btn emergency-abort" id="emergency-abort-btn" type="button"
-                            onclick="emergencyAbort()" title="Immediately stop Nav2 (abort mission)">
-                             ABORT
-                        </button>
-                        <button class="tool-btn emergency-home" id="emergency-home-btn" type="button"
-                            onclick="emergencyReturnHome()" title="Cancel current mission and drive back to map origin (0, 0, 0°)">
-                            Return To Home
-                        </button>
-                    </div>
+    <button class="tool-btn" onclick="fitMapView()" title="Fit map to panel">Fit</button>
+    <button class="tool-btn" id="follow-btn" onclick="toggleFollow()"
+        title="Keep the rover centred">Follow</button>
+    <button class="tool-btn" onclick="clearMarkers()"
+        title="Remove target and waypoint markers">Clear</button>
+    <span class="tool-sep"></span>
+    <button class="tool-btn emergency-reset" id="slam-reset-btn" type="button"
+        onclick="resetSlam()" title="Clear the SLAM map and restart mapping from the rover's current location (new origin = 0,0,0)">
+        Clear SLAM
+    </button>
+    <button class="tool-btn emergency-abort" id="emergency-abort-btn" type="button"
+        onclick="emergencyAbort()" title="Immediately stop Nav2 (abort mission)">
+         ABORT
+    </button>
+    <button class="tool-btn emergency-home" id="emergency-home-btn" type="button"
+        onclick="emergencyReturnHome()" title="Cancel current mission and drive back to map origin (0, 0, 0°)">
+        Return To Home
+    </button>
+</div>
                 </div>
                 <div class="panel-body">
                     <div class="map-container" id="map-wrapper">
