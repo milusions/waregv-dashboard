@@ -1431,3 +1431,232 @@ body:has(.voice-modal.active) .helio-fab-wrap { display: none !important; }
         height: 22px;
     }
 }
+
+/* =====================================================================
+   Rover state machine — header controls
+   ===================================================================== */
+
+/* ----- Read-only state chip ----- */
+.state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    background: var(--panel-2);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+    transition: color .18s ease, border-color .18s ease, background .18s ease;
+}
+.state-chip .state-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor;
+    flex: none;
+    box-shadow: 0 0 0 0 currentColor;
+}
+.state-chip.pulse .state-dot { animation: statePulse 1.2s ease-in-out infinite; }
+@keyframes statePulse {
+    0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+    50%      { box-shadow: 0 0 0 5px transparent; opacity: .55; }
+}
+.state-chip.shake { animation: stateShake .45s ease-in-out 1; }
+@keyframes stateShake {
+    0%, 100% { transform: translateX(0); }
+    20%      { transform: translateX(-3px); }
+    40%      { transform: translateX(3px); }
+    60%      { transform: translateX(-2px); }
+    80%      { transform: translateX(2px); }
+}
+
+.state-chip[data-state="boot"]         { color: var(--muted);   border-color: var(--border); }
+.state-chip[data-state="preflight"]    { color: var(--warning); border-color: rgba(232,163,23,.4); }
+.state-chip[data-state="idle"]         { color: var(--muted);   border-color: var(--border); }
+.state-chip[data-state="warmup"]       { color: var(--primary); border-color: rgba(0,119,255,.4); }
+.state-chip[data-state="sman_active"]  { color: var(--success); border-color: rgba(0,157,91,.4); }
+.state-chip[data-state="paused"]       { color: var(--warning); border-color: rgba(232,163,23,.4); }
+.state-chip[data-state="fault"]        { color: var(--danger);  border-color: rgba(227,0,53,.45);
+                                          background: rgba(227,0,53,.08); }
+.state-chip[data-state="session_end"]  { color: var(--muted);   border-color: var(--border); }
+.state-chip[data-state="unknown"]      { color: var(--muted);   border-color: var(--border); }
+
+/* ----- SMAN segmented switch ----- */
+.sman-switch {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    gap: 2px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    position: relative;
+    transition: opacity .18s ease, filter .18s ease;
+}
+.sman-switch[aria-disabled="true"] {
+    opacity: 0.45;
+    filter: saturate(0.4);
+}
+.sman-switch[aria-disabled="true"] .sman-seg { pointer-events: none; cursor: not-allowed; }
+.sman-switch.busy .sman-seg { pointer-events: none; }
+
+.sman-seg {
+    height: 26px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+    white-space: nowrap;
+}
+.sman-seg:hover:not(:disabled) { color: var(--text); background: rgba(127,127,127,.10); }
+.sman-seg:disabled { cursor: not-allowed; }
+.sman-seg.active {
+    background: var(--primary);
+    color: #fff;
+    cursor: default;
+}
+.sman-seg[data-target="paused"].active {
+    background: var(--warning);
+    color: #111;
+}
+
+.sman-spinner {
+    display: none;
+    width: 12px; height: 12px;
+    margin: 0 4px 0 2px;
+    border: 2px solid var(--primary);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: btnspin 0.7s linear infinite;
+}
+.sman-switch.busy .sman-spinner { display: inline-block; }
+
+/* ----- Shutdown button ----- */
+.icon-btn.shutdown-btn {
+    width: auto;
+    min-width: 100px;
+    height: 32px;
+    padding: 0 12px;
+    gap: 6px;
+    color: var(--danger);
+    background: transparent;
+    border: 1px solid rgba(227,0,53,.45);
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+}
+.icon-btn.shutdown-btn svg { width: 13px; height: 13px; }
+.icon-btn.shutdown-btn:hover {
+    background: var(--danger);
+    color: #fff;
+    border-color: var(--danger);
+    transform: translateY(-1px);
+}
+.icon-btn.shutdown-btn:active { transform: translateY(0); }
+.icon-btn.shutdown-btn:disabled {
+    opacity: 0.55;
+    cursor: progress;
+    transform: none;
+}
+.icon-btn.shutdown-btn.loading svg { display: none; }
+.icon-btn.shutdown-btn.loading::before {
+    content: "";
+    width: 12px; height: 12px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: btnspin 0.7s linear infinite;
+}
+
+/* ----- ROS-down overlay ----- */
+.ros-down-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7,9,14,.88);
+    backdrop-filter: blur(6px);
+}
+.ros-down-overlay[hidden] { display: none; }
+.ros-down-card {
+    width: min(420px, 92vw);
+    padding: 26px 24px 22px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5);
+    text-align: center;
+}
+.ros-down-icon {
+    font-size: 2.4rem;
+    line-height: 1;
+    color: var(--danger);
+    margin-bottom: 10px;
+}
+.ros-down-card h3 {
+    margin: 0 0 8px;
+    font-size: 1.15rem;
+    color: var(--text);
+}
+.ros-down-card p {
+    margin: 0 0 18px;
+    font-size: .84rem;
+    line-height: 1.5;
+    color: var(--muted);
+}
+.ros-down-card .btn { width: 100%; height: 38px; font-size: .85rem; }
+
+/* Mobile tweaks */
+@media (max-width: 640px) {
+    .icon-btn.shutdown-btn { min-width: 34px; padding: 0 8px; }
+    .icon-btn.shutdown-btn .shutdown-label { display: none; }
+    .state-chip { font-size: .68rem; padding: 3px 8px; }
+    .sman-seg { font-size: .66rem; padding: 0 9px; height: 24px; letter-spacing: 0.02em; }
+}
+
+@media (max-width: 900px) {
+    .state-chip .state-label { max-width: 84px; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* =====================================================================
+   Ask Helio — mobile-disabled state
+   ===================================================================== */
+.waergv-mobile-note {
+    margin-top: 2px;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+.waergv-panel.mobile-disabled {
+    filter: saturate(0.65) brightness(0.96);
+    cursor: not-allowed;
+}
+.waergv-panel.mobile-disabled:hover {
+    transform: none;
+    filter: saturate(0.65) brightness(0.96);
+}
+
+/* Disabled wake-word button (mobile) */
+.icon-btn.wake-btn.disabled,
+.icon-btn.wake-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    filter: saturate(0.4);
+}
+.icon-btn.wake-btn:disabled:hover {
+    border-color: var(--border);
+    color: var(--text);
+}

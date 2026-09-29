@@ -3765,3 +3765,396 @@ document.addEventListener('keydown', (event) => { if (event.key === 'Escape') cl
 
     requestAnimationFrame(frame);
 })();
+
+
+// =====================================================================
+//  ROVER STATE MACHINE  —  header controls
+//
+//  Backend contract (adjust endpoints in SYSTEM_STATE below if needed):
+//    GET  /system/state                      -> { state, detail, since, ros_up }
+//    POST /system/state    { state: "<x>" }  -> { ok, state }   (409 on bad transition)
+//    POST /system/shutdown                   -> { ok }
+//
+//  Only these two states are user-selectable from the header switch:
+//      sman_active  <->  paused
+//
+//  All other states are owned by the backend and merely mirrored here.
+// =====================================================================
+
+const SYSTEM_STATE = {
+    pollMs: 1500,
+    requestTimeoutMs: 6000,
+
+    // REST paths — change here only.
+    paths: {
+        getState: '/system/state',
+        setState: '/system/state',
+        shutdown: '/system/shutdown'
+    },
+
+    // Only these two are user-selectable.
+    USER_STATES: ['sman_active', 'paused'],
+
+    // These states get a pulsing indicator (transient / in progress).
+    PULSING: ['boot', 'preflight', 'warmup'],
+
+    LABELS: {
+        boot:         'BOOT',
+        preflight:    'PREFLIGHT',
+        idle:         'IDLE',
+        warmup:       'WARM-UP',
+        sman_active:  'SMAN ACTIVE',
+        paused:       'PAUSED',
+        fault:        'FAULT',
+        session_end:  'SESSION END',
+        unknown:      'UNKNOWN'
+    }
+};
+
+const SysState = {
+    current: 'unknown',
+    since: 0,
+    rosUp: true,
+    lastPollOk: 0,
+    busy: false,
+    pollTimer: null,
+    shutdownInFlight: false,
+    dom: {
+        chip: null,
+        label: null,
+        sw: null,
+        segs: [],
+        shutdown: null
+    }
+};
+
+// ----- DOM cache -----
+function sysStateCacheDom() {
+    SysState.dom.chip     = document.getElementById('rover-state-chip');
+    SysState.dom.label    = document.getElementById('rover-state-label');
+    SysState.dom.sw       = document.getElementById('sman-switch');
+    SysState.dom.segs     = SysState.dom.sw
+        ? Array.from(SysState.dom.sw.querySelectorAll('.sman-seg'))
+        : [];
+    SysState.dom.shutdown = document.getElementById('shutdown-btn');
+}
+
+// ----- Helpers -----
+function sysStateIsUserSelectable() {
+    return SYSTEM_STATE.USER_STATES.includes(SysState.current);
+}
+
+// ----- Rendering -----
+function renderSystemState() {
+    const { chip, label, sw, segs, shutdown } = SysState.dom;
+    const state = SysState.current;
+    const text  = SYSTEM_STATE.LABELS[state] || state;
+
+    if (chip) {
+        chip.dataset.state = state;
+        chip.classList.toggle('pulse', SYSTEM_STATE.PULSING.includes(state));
+        chip.title = 'Rover state: ' + text +
+            (SysState.since ? '  ·  since ' + new Date(SysState.since).toLocaleTimeString() : '');
+    }
+    if (label) label.textContent = text;
+
+    if (sw) {
+        const selectable = sysStateIsUserSelectable() && SysState.rosUp;
+        sw.setAttribute('aria-disabled', selectable ? 'false' : 'true');
+        sw.title = selectable
+            ? 'Switch between SMAN Active and Paused'
+            : 'Locked — SMAN control unlocks once the rover reaches SMAN or Paused.';
+        sw.classList.toggle('busy', SysState.busy);
+
+        segs.forEach(seg => {
+            const segState = seg.dataset.target;
+            const isActive = segState === state;
+            seg.classList.toggle('active', isActive);
+            seg.disabled = !selectable || isActive || SysState.busy;
+        });
+    }
+
+    if (shutdown) {
+        shutdown.disabled = SysState.shutdownInFlight;
+        shutdown.classList.toggle('loading', SysState.shutdownInFlight);
+    }
+}
+
+// ----- Applying a server snapshot -----
+function applySystemSnapshot(data) {
+    if (!data || typeof data !== 'object') return;
+    const next = String(data.state || 'unknown').toLowerCase();
+    const changed = next !== SysState.current;
+
+    SysState.current = next;
+    SysState.since   = Number(data.since) || SysState.since || 0;
+    SysState.rosUp   = data.ros_up !== false;
+    SysState.lastPollOk = Date.now();
+
+    if (changed && next === 'fault' && SysState.dom.chip) {
+        SysState.dom.chip.classList.remove('shake');
+        void SysState.dom.chip.offsetWidth;
+        SysState.dom.chip.classList.add('shake');
+    }
+
+    renderSystemState();
+}
+
+// ----- Fetch current state -----
+async function fetchSystemState() {
+    try {
+        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.getState, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        applySystemSnapshot(data);
+    } catch (_) {
+        // Leave the previous state on screen; the "ROS Disconnected" badge
+        // already tells the user we've lost the bridge.
+    }
+}
+
+// ----- User requests a SMAN transition -----
+async function requestSmanState(target) {
+    if (!SYSTEM_STATE.USER_STATES.includes(target)) return;
+    if (!sysStateIsUserSelectable()) return;
+    if (SysState.busy) return;
+    if (SysState.current === target) return;
+
+    SysState.busy = true;
+    renderSystemState();
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SYSTEM_STATE.requestTimeoutMs);
+
+    try {
+        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.setState, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ state: target }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        const raw = await res.text();
+        let data = {};
+        try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
+
+        if (res.status === 409) {
+            notify('WARNING', 'Rover refused the switch: ' + (data.detail || 'state transition not allowed.'));
+            await fetchSystemState();
+        } else if (!res.ok) {
+            throw new Error(data.detail || ('HTTP ' + res.status));
+        } else {
+            applySystemSnapshot(data.state ? data : { state: target, ros_up: SysState.rosUp });
+            notify('INFO', 'Requested ' + (SYSTEM_STATE.LABELS[target] || target) + '.');
+            // Confirm with the backend on the next tick.
+            setTimeout(fetchSystemState, 400);
+        }
+    } catch (err) {
+        clearTimeout(timeoutId);
+        const msg = err.name === 'AbortError' ? 'Rover did not respond in time.' : err.message;
+        notify('ERROR', 'SMAN switch failed: ' + msg);
+        await fetchSystemState();
+    } finally {
+        SysState.busy = false;
+        renderSystemState();
+    }
+}
+
+// ----- Shutdown dialog -----
+function openShutdownDialog() {
+    if (SysState.shutdownInFlight) return;
+    const dlg = document.getElementById('shutdown-dialog');
+    const status = document.getElementById('shutdown-status');
+    if (!dlg) return;
+    if (status) status.textContent = '';
+    dlg.hidden = false;
+}
+
+function closeShutdownDialog() {
+    const dlg = document.getElementById('shutdown-dialog');
+    if (dlg) dlg.hidden = true;
+}
+
+async function confirmShutdown() {
+    if (SysState.shutdownInFlight) return;
+    const status = document.getElementById('shutdown-status');
+    const confirmBtn = document.getElementById('shutdown-confirm');
+
+    SysState.shutdownInFlight = true;
+    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.classList.add('loading'); }
+    if (status) status.textContent = 'Sending shutdown request…';
+    renderSystemState();
+
+    try {
+        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.shutdown, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const raw = await res.text();
+        let data = {};
+        try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+
+        if (status) status.textContent = 'Shutdown acknowledged. Waiting for ROS to go down…';
+        notify('WARNING', 'ROS shutdown requested. The rover is powering down.');
+
+        // Give the backend a moment, then show the overlay.
+        setTimeout(() => {
+            closeShutdownDialog();
+            const overlay = document.getElementById('ros-down-overlay');
+            if (overlay) overlay.hidden = false;
+        }, 1200);
+    } catch (err) {
+        if (status) status.textContent = 'Shutdown failed: ' + err.message;
+        notify('ERROR', 'Shutdown failed: ' + err.message);
+        SysState.shutdownInFlight = false;
+        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.classList.remove('loading'); }
+        renderSystemState();
+    }
+}
+
+// ----- Polling loop -----
+function startSystemStatePolling() {
+    if (SysState.pollTimer) clearInterval(SysState.pollTimer);
+    fetchSystemState();
+    SysState.pollTimer = setInterval(fetchSystemState, SYSTEM_STATE.pollMs);
+}
+
+// ----- Public API (needed by inline onclick handlers) -----
+window.requestSmanState     = requestSmanState;
+window.openShutdownDialog   = openShutdownDialog;
+window.closeShutdownDialog  = closeShutdownDialog;
+window.confirmShutdown      = confirmShutdown;
+
+// ----- Boot -----
+(function initRoverStateMachine() {
+    sysStateCacheDom();
+    renderSystemState();
+    // Wait one tick so the rest of the app has a chance to wire up first.
+    setTimeout(startSystemStatePolling, 600);
+
+    // Re-poll immediately whenever the ROS bridge reconnects.
+    // (rosConnected is a global from the main script; poll on a soft timer too.)
+    setInterval(() => {
+        if (typeof rosConnected !== 'undefined' && rosConnected) {
+            // Cheap: only re-poll if the last successful poll is stale.
+            if (Date.now() - SysState.lastPollOk > SYSTEM_STATE.pollMs * 2) {
+                fetchSystemState();
+            }
+        }
+    }, 3000);
+})();
+
+// =====================================================================
+//  MOBILE VOICE GATE
+//  Speech recognition (STT) and text-to-speech (TTS) are disabled on
+//  mobile / touch-primary devices and on small viewports. This block
+//  must run BEFORE the init() IIFE below to neutralise any voice code
+//  that already ran, and to install the guard used by openVoiceModal,
+//  activateHelio, bindRecognition, syncEngine, and speakText.
+// =====================================================================
+
+(function installMobileVoiceGate() {
+
+    // ----- 1. Mobile detection (3 layers, catches desktop-mode phones) -----
+    const IS_MOBILE_DEVICE = (function detectMobile() {
+        try {
+            if (window.matchMedia && window.matchMedia('(max-width: 640px)').matches) return true;
+            const coarse  = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+            const noHover = window.matchMedia && window.matchMedia('(hover: none)').matches;
+            if (coarse && noHover) return true;
+            if (/Android|iPhone|iPad|iPod|Mobile|Windows Phone|webOS|BlackBerry/i.test(navigator.userAgent || '')) {
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    })();
+
+    const TTS_SUPPORTED = (!IS_MOBILE_DEVICE) && ('speechSynthesis' in window);
+
+    // Expose for the rest of the app.
+    window.IS_MOBILE_DEVICE = IS_MOBILE_DEVICE;
+    window.TTS_SUPPORTED    = TTS_SUPPORTED;
+
+    if (!IS_MOBILE_DEVICE) return;   // Nothing else to do on desktop.
+
+    // ----- 2. Null out the recognition implementation -----
+    // The global `const SpeechRecognitionImpl` in the main script cannot
+    // be reassigned, so we shadow the module-level variable it feeds:
+    // recognition gets aborted and never restarted.
+    try { if (typeof recognition !== 'undefined' && recognition) recognition.abort(); } catch (_) {}
+
+    // Kill any in-flight timers that could restart the engine.
+    try { if (typeof clearVoiceTimers === 'function') clearVoiceTimers(); } catch (_) {}
+    try { if (typeof stopThinkingIndicator === 'function') stopThinkingIndicator(); } catch (_) {}
+    try { if (typeof MicLevels !== 'undefined' && MicLevels.stop) MicLevels.stop(); } catch (_) {}
+    try { if (typeof TalkAnimator !== 'undefined' && TalkAnimator.stop) TalkAnimator.stop(); } catch (_) {}
+    try { if (typeof EyeMotion !== 'undefined' && EyeMotion.stop) EyeMotion.stop(); } catch (_) {}
+    try { if (typeof PeekController !== 'undefined' && PeekController.stop) PeekController.stop(); } catch (_) {}
+    try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch (_) {}
+
+    // ----- 3. Override the speech entry points -----
+    // speakText: no-op on mobile.
+    window.speakText = function () { return Promise.resolve(); };
+
+    // openVoiceModal: shows a clear notice instead of starting voice.
+    window.openVoiceModal = function () {
+        if (typeof notify === 'function') {
+            notify('INFO', 'Helio voice mode is disabled on mobile. Open the dashboard on a desktop to use voice.');
+        }
+    };
+
+    // activateHelio: hard-refuse.
+    window.activateHelio = function () { /* disabled on mobile */ };
+
+    // ----- 4. Disable the wake-word button and neutralise wake handling -----
+    function disableWakeBtn() {
+        const wakeBtn = document.getElementById('wake-btn');
+        if (wakeBtn) {
+            wakeBtn.disabled = true;
+            wakeBtn.classList.add('disabled');
+            wakeBtn.title = 'Voice features are disabled on mobile.';
+            wakeBtn.setAttribute('aria-disabled', 'true');
+        }
+        // Also close the wake menu if it somehow opened.
+        const menu = document.getElementById('wake-menu');
+        if (menu) menu.hidden = true;
+    }
+
+    // toggleWakeMenu / toggleWake become inert.
+    window.toggleWakeMenu = function (event) {
+        if (event && event.stopPropagation) event.stopPropagation();
+        disableWakeBtn();
+    };
+    window.toggleWake = function () { /* disabled on mobile */ };
+
+    // ----- 5. Reflect the disabled state in the Ask Helio card -----
+    function markHelioCardDisabled() {
+        const panel = document.getElementById('waergv-panel');
+        const note  = document.getElementById('waergv-mobile-note');
+        if (note) note.hidden = false;
+        if (panel) {
+            panel.classList.add('mobile-disabled');
+            panel.title = 'Helio voice mode is disabled on mobile. Open on desktop to use voice.';
+        }
+    }
+
+    // ----- 6. Apply once the DOM is ready (script runs after DOM in this file) -----
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            disableWakeBtn();
+            markHelioCardDisabled();
+        });
+    } else {
+        disableWakeBtn();
+        markHelioCardDisabled();
+    }
+
+    // Re-apply after the main init() has run (main init also touches the
+    // wake button at startup). A short timeout is enough.
+    setTimeout(function () {
+        disableWakeBtn();
+        markHelioCardDisabled();
+    }, 800);
+
+})();
