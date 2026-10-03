@@ -1,4160 +1,563 @@
-// =====================================================================
-//  Milusions WareGV Suite - dashboard logic
-//  UI (index.html / style.css) + live rover integration:
-//    - rosbridge  (/map /odom /tf /cmd_vel /plan, publishes /cmd_vel_joy)
-//    - REST API   (navigation, initial pose, waypoints, abort, mode, save map)
-//    - Helio      (continuous voice assistant, wake word, local command engine)
-//
-//  All service endpoints use the authenticated rover host. The dashboard
-//  never falls back to the browser hostname or URL endpoint overrides.
-// =====================================================================
-
-// =====================================================================
-//  CONFIGURATION
-// =====================================================================
-const SESSION_HOST_KEY = 'Rover host';
-const SESSION_EXPIRY_KEY = 'Rover host expires';
-
-function isValidRoverHost(value) {
-    const host = String(value || '').trim();
-    if (host === 'localhost') return true;
-    const parts = host.split('.');
-    return parts.length === 4 && parts.every((part) =>
-        /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255
-    );
-}
-
-function readAuthenticatedRoverHost() {
-    const configuredHost = String(window.ROVER_IP || window.ROVER_HOST || '').trim();
-    if (isValidRoverHost(configuredHost)) return configuredHost;
-    try {
-        const storedHost = String(localStorage.getItem(SESSION_HOST_KEY) || '').trim();
-        const expiry = Number(localStorage.getItem(SESSION_EXPIRY_KEY) || 0);
-        if (isValidRoverHost(storedHost) && Date.now() < expiry) return storedHost;
-    } catch (_) {}
-    return '';
-}
-
-const ROVER_IP = readAuthenticatedRoverHost();
-if (!ROVER_IP) {
-    window.location.replace('login.html');
-    throw new Error('Rover session is missing or expired. Redirecting to login.');
-}
-
-const REST_API_BASE = `http://${ROVER_IP}:8000`;
-const ROSBRIDGE_WS_URL = `ws://${ROVER_IP}:9090`;
-const HELIO_WS_URL = `ws://${ROVER_IP}:8001/ws/helio`;
-
-const CFG = {
-    chartWindowSec: 30,
-    joyRateHz: 20,
-    reachTolM: 0.30,
-    planTimeoutMs: 20000,
-    cmdVelStaleMs: 600,
-    rosRetryMs: 3000
+// ===== config =====
+const ROSBRIDGE_PORT = 9090;
+const BACKEND_PORT = 8000;               // only used for Ask Helio
+const T = {
+  map:    '/map',
+  global: '/global_costmap/costmap',
+  local:  '/local_costmap/costmap',
+  scan:   '/scan',
+  plan:   '/plan',
+  navStatus: '/navigate_to_pose/_action/status',
+  navCancel: '/navigate_to_pose/_action/cancel_goal',
+  goal:   '/goal_pose',
+  cmdVel: '/cmd_vel',
+  saveMap: '/slam_toolbox/save_map',
+  odom:  '/odom',
+  globalUpdates: '/global_costmap/costmap_updates',
+  localUpdates:  '/local_costmap/costmap_updates',
+  clearGlobal: '/global_costmap/clear_entirely_global_costmap',
+  clearLocal:  '/local_costmap/clear_entirely_local_costmap',
 };
+const SPEAK_ON_ROVER = false; // also send Helio replies to the rover speaker topic
+const TURN_LINEAR = 0;    // forward speed added while turning left/right (0 = spin in place)
+const BASE_FRAME = 'base_link';
 
-const TOPICS = {
-    map: '/map',
-    odom: '/odom',
-    cmdVel: '/cmd_vel',
-    plan: '/plan',
-    jointStates: '/joint_states',
-    localCostmap: '/local_costmap/costmap',
-    globalCostmap: '/global_costmap/costmap',
-    scan: '/scan',
-    joy: '/cmd_vel_joy',
-    tf: '/tf',
-    tfStatic: '/tf_static',
-    nav2Status: '/navigate_to_pose/_action/status',
-    btLog: '/behavior_tree_log',
-    rosout: '/rosout'
-};
+// joystick defaults; the fields in the Joystick panel override these live
+const DEF = { maxLin: 0.3, maxAng: 0.21, accel: 0.5, angAccel: 0.5 };
+const field = (id, d) => { const v = parseFloat(document.getElementById(id).value); return v > 0 ? v : d; };
+const getCfg = () => ({
+  maxLin: field('set-lin', DEF.maxLin), maxAng: field('set-ang', DEF.maxAng),
+  accel: field('set-acc', DEF.accel), angAccel: field('set-angacc', DEF.angAccel),
+});
 
-const layerVis = { map: true, plan: true, localCostmap: true, globalCostmap: true, scan: true };
-let latestScanPoints = [];
-function onScanPointCloudMsg(msg) {
-    const pts = [];
+// log only navigation / mapping related lines from /rosout
+const NAVMAP_RE = /nav|planner|controller|bt_|behavior|costmap|amcl|slam|map|waypoint|smoother|recovery|lifecycle|goal|path|locali/i;
+
+// ===== login (native prompts) + rosbridge connect =====
+let ros = null, IP = '';
+
+function connect(ip) {
+  return new Promise((resolve, reject) => {
+    const r = new ROSLIB.Ros({ url: `ws://${ip}:${ROSBRIDGE_PORT}` });
+    r.on('connection', () => resolve(r));
+    r.on('error', () => reject());
+    r.on('close', () => { navEl.textContent = 'Nav: disconnected'; });
+  });
+}
+
+async function login() {
+  while (true) {
+    const user = prompt('Username:', 'waregv');
+    if (user === null) return false;
+    const pass = prompt('Password (rover IP):', localStorage.getItem('ip') || '');
+    if (pass === null) return false;
+    if (user.trim().toLowerCase() !== 'waregv') { alert('Wrong username.'); continue; }
     try {
-        const ranges = msg.ranges || [];
-        const angleMin = msg.angle_min, angleInc = msg.angle_increment;
-        const rMin = msg.range_min, rMax = msg.range_max;
-        const rx = robot ? robot.x : 0, ry = robot ? robot.y : 0, ryaw = robot ? robot.yaw : 0;
-        for (let i = 0; i < ranges.length; i++) {
-            const r = ranges[i];
-            if (!isFinite(r) || r < rMin || r > rMax) continue;
-            const ang = angleMin + i * angleInc;
-            const lx = r * Math.cos(ang), ly = r * Math.sin(ang);
-            const wx = rx + lx * Math.cos(ryaw) - ly * Math.sin(ryaw);
-            const wy = ry + lx * Math.sin(ryaw) + ly * Math.cos(ryaw);
-            pts.push({ x: wx, y: wy });
-        }
-    } catch (e) {}
-    latestScanPoints = pts;
-    needsDraw = true;
-}
-function setLayerVisible(key, visible) {
-    layerVis[key] = !!visible;
-    needsDraw = true;
-}
-const MAP_FRAME = 'map';
-
-const MODE_LABELS = { auto_nav: 'Autonomous Driving and Mapping' };
-const modeLabel = (m) => MODE_LABELS[m] || String(m || 'Unknown');
-
-// =====================================================================
-//  Notifications
-// =====================================================================
-const NOTIFY_TTL = { ERROR: 12000, WARNING: 8000, INFO: 5000 };
-
-function notify(level, message) {
-    level = (level || 'INFO').toUpperCase();
-    const stack = document.getElementById('notify-stack');
-    if (!stack) return;
-    for (const el of stack.children) {
-        if (el.dataset.key === level + message) { resetNoticeTimer(el, level); return; }
-    }
-    const el = document.createElement('div');
-    el.className = 'notice ' + level.toLowerCase();
-    el.dataset.key = level + message;
-    el.setAttribute('role', level === 'ERROR' ? 'alert' : 'status');
-    el.innerHTML = '<div class="notice-hd"><span class="notice-lvl">' + level +
-        '</span><button class="notice-x" aria-label="Dismiss">&times;</button></div><div class="notice-msg"></div>';
-    el.querySelector('.notice-msg').textContent = message;
-    el.querySelector('.notice-x').onclick = () => dismissNotice(el);
-    stack.appendChild(el);
-    while (stack.children.length > 5) stack.removeChild(stack.firstChild);
-    resetNoticeTimer(el, level);
-}
-function resetNoticeTimer(el, level) {
-    clearTimeout(el._t);
-    el._t = setTimeout(() => dismissNotice(el), NOTIFY_TTL[level] || 5000);
-}
-function dismissNotice(el) {
-    clearTimeout(el._t);
-    el.classList.add('leaving');
-    setTimeout(() => el.remove(), 220);
-}
-
-// =====================================================================
-//  Helio State Synchronization to Backend
-// =====================================================================
-async function notifyHelioState(event, state, text = '', sound_name = '') {
-    console.log(`[Helio State] Event: ${event}, State: ${state}`, { text, sound_name });
-    try {
-        await fetch(REST_API_BASE + '/helio/state', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ event, state, text, sound_name })
-        });
+      ros = await connect(pass.trim());
+      IP = pass.trim();
+      localStorage.setItem('ip', IP);
+      return true;
     } catch (e) {
-        console.error('[Helio State] Sync failed', e);
+      alert('rosbridge did not respond at ' + pass.trim() + ':' + ROSBRIDGE_PORT);
     }
+  }
 }
 
-// =====================================================================
-//  Theme
-// =====================================================================
-const theme = {};
-function readTheme() {
-    const cs = getComputedStyle(document.body);
-    ['--map-bg', '--map-free', '--map-occ', '--map-grid', '--series-a', '--series-b', '--border', '--muted',
-     '--text', '--success', '--primary', '--panel', '--danger', '--warning']
-        .forEach(k => theme[k] = cs.getPropertyValue(k).trim());
-}
-function applyTheme(isLight) {
-    document.body.classList.toggle('light-theme', isLight);
-    readTheme();
-    mapImageDirty = true; needsDraw = true;
-    if (typeof mvDraw === 'function') mvDraw();
-}
-function toggleTheme() {
-    const isLight = !document.body.classList.contains('light-theme');
-    applyTheme(isLight);
-    try { localStorage.setItem('milusions-theme', isLight ? 'light' : 'dark'); } catch (e) {}
-}
+const topic = (name, type, opts = {}) =>
+  new ROSLIB.Topic({ ros, name, messageType: type, ...opts });
 
-function updateDocumentFullscreenButton() {
-    const button = document.getElementById('document-fullscreen-btn');
-    if (!button) return;
-    const active = Boolean(document.fullscreenElement);
-    button.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
-    button.setAttribute('aria-label', button.title);
-    button.querySelector('span').textContent = '⛶';
-}
-
-async function toggleDocumentFullscreen() {
-    try {
-        if (document.fullscreenElement) {
-            await document.exitFullscreen();
-        } else if (document.documentElement.requestFullscreen) {
-            await document.documentElement.requestFullscreen();
-        } else {
-            notify('WARNING', 'Fullscreen is not supported by this browser.');
-        }
-    } catch (error) {
-        notify('ERROR', 'Could not change fullscreen mode.');
-    }
-    updateDocumentFullscreenButton();
-}
-
-document.addEventListener('fullscreenchange', updateDocumentFullscreenButton);
-document.addEventListener('DOMContentLoaded', () => renderNav2Logs());
-window.toggleDocumentFullscreen = toggleDocumentFullscreen;
-
-// =====================================================================
-//  State
-// =====================================================================
-let mapImageDirty = false, needsDraw = true;
-let latestMap = null;
-let latestPlan = [];
-let navStatus = 'Idle';
-let missionGoal = null;
-let ignorePlansUntil = 0;
-let distanceRemaining = null;
-
-const NAV2_GOAL_STATUS_NAMES = {
-    0: 'UNKNOWN', 1: 'ACCEPTED', 2: 'EXECUTING', 3: 'CANCELING',
-    4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'
+// ===== state =====
+const COLORS = {
+  slam: [20, 20, 20], global: [255, 140, 0], local: [150, 60, 220],
+  scan: [230, 30, 30], path: [0, 160, 60],
 };
-let nav2GoalStatusCode = null;
-let nav2ActiveNode = null;
-let nav2Stage = null;
-let nav2StatusMsgAt = 0;
-let nav2LastError = null;
-const nav2LogHistory = [];
-let nav2LogIndex = -1;
-const NAV2_LOG_HISTORY_MAX = 50;
-const NAV2_STATUS_FRESH_MS = 4000;
-const NAV2_ERROR_BUBBLE_MS = 12000;
-const NAV2_NODE_RE = /bt_navigator|controller_server|planner_server|recoveries_server|behavior_server|waypoint_follower|smoother_server|velocity_smoother|collision_monitor|costmap/i;
-const NAV2_RECOVERY_NODE_RE = /recover|spin|back ?up|wait|clear ?costmap|assisted_teleop/i;
-const NAV2_PLAN_NODE_RE = /computepathtopose|compute_path|planner|smoothpath|smooth_path/i;
+const rgb = c => `rgb(${c.join(',')})`;
+const show = { slam: true, global: true, local: true, scan: true, path: true };
+const layers = { slam: null, global: null, local: null };   // {w,h,res,ox,oy,frame,img}
+let scan = null;                                            // {frame, angle_min, inc, ranges}
+let plan = null;                                            // {frame, pts}
+const vel = { v: null, w: null };                          // from /odom
+const tfs = {};                                             // child -> {parent,x,y,yaw}
 
-function nav2StatusFresh() { return Date.now() - nav2StatusMsgAt < NAV2_STATUS_FRESH_MS; }
+const canvas = document.getElementById('map');
+const ctx = canvas.getContext('2d');
+const logEl = document.getElementById('log');
+const navEl = document.getElementById('nav-state');
 
-function nav2StageLabel(nodeName) {
-    if (!nodeName) return null;
-    if (NAV2_RECOVERY_NODE_RE.test(nodeName)) return 'Recovering: ' + nodeName;
-    if (NAV2_PLAN_NODE_RE.test(nodeName)) return 'Planning path';
-    if (/followpath|follow_path/i.test(nodeName)) return 'Following path';
-    return nodeName;
+const COST_GRADIENT = 'linear-gradient(90deg, #0000ff, #7f007f, #ff0000)';
+document.querySelectorAll('.sw').forEach(el => {
+  const k = el.dataset.color;
+  el.style.background = (k === 'global' || k === 'local') ? COST_GRADIENT : rgb(COLORS[k]);
+});
+document.querySelectorAll('[data-layer]').forEach(cb =>
+  cb.addEventListener('change', () => { show[cb.dataset.layer] = cb.checked; dirty(); }));
+
+// ===== TF =====
+const yawOf = q => Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+
+function getPose(frame, depth = 0) {
+  if (!frame || frame === 'map') return { x: 0, y: 0, yaw: 0 };
+  const t = tfs[frame];
+  if (!t || depth > 12) return null;
+  const p = getPose(t.parent, depth + 1);
+  if (!p) return null;
+  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+  return { x: p.x + t.x * c - t.y * s, y: p.y + t.x * s + t.y * c, yaw: p.yaw + t.yaw };
 }
-
-function applyNav2Status() {
-    const isRecovery = nav2ActiveNode && NAV2_RECOVERY_NODE_RE.test(nav2ActiveNode);
-    nav2Stage = nav2StageLabel(nav2ActiveNode) || (nav2GoalStatusCode ? nav2GoalStatusCode : null);
-    switch (nav2GoalStatusCode) {
-        case 'ACCEPTED':
-        case 'EXECUTING':
-            navStatus = isRecovery ? 'Recovering' : (nav2ActiveNode && NAV2_PLAN_NODE_RE.test(nav2ActiveNode) ? 'Planning' : 'Navigating');
-            break;
-        case 'SUCCEEDED':
-            if (navStatus !== 'Reached') {
-                navStatus = 'Reached'; missionGoal = null; latestPlan = [];
-                ignorePlansUntil = Date.now() + 1500; clearNavLoading();
-                notify('INFO', 'Navigation destination reached.');
-            }
-            nav2Stage = 'Reached';
-            break;
-        case 'ABORTED':
-            if (navStatus !== 'Aborted') {
-                navStatus = 'Aborted'; missionGoal = null; clearNavLoading();
-                notify('ERROR', 'Nav2 aborted the mission' + (nav2LastError ? ': ' + nav2LastError.text : '.'));
-            }
-            nav2Stage = 'Aborted' + (nav2LastError ? ': ' + nav2LastError.text : '');
-            break;
-        case 'CANCELED':
-            navStatus = 'Idle'; missionGoal = null; clearNavLoading();
-            nav2Stage = 'Canceled';
-            break;
-        default:
-            break;
-    }
-    needsDraw = true;
-}
-
-const ROSOUT_WARN = 30, ROSOUT_ERROR = 40, ROSOUT_FATAL = 50;
-function onRosoutMsg(msg) {
-    if (!msg || msg.level < ROSOUT_WARN) return;
-    if (!NAV2_NODE_RE.test(msg.name || '')) return;
-
-    const entry = {
-        text: String(msg.msg || '').trim(),
-        node: String(msg.name || 'Nav2'),
-        level: Number(msg.level) >= ROSOUT_FATAL ? 'FATAL' : (Number(msg.level) >= ROSOUT_ERROR ? 'ERROR' : 'WARN'),
-        levelCode: Number(msg.level),
-        ts: Date.now()
-    };
-    if (!entry.text) return;
-
-    nav2LastError = entry;
-    nav2StatusMsgAt = entry.ts;
-
-    const previous = nav2LogHistory[nav2LogHistory.length - 1];
-    if (!previous || previous.text !== entry.text || previous.node !== entry.node || previous.level !== entry.level) {
-        nav2LogHistory.push(entry);
-        while (nav2LogHistory.length > NAV2_LOG_HISTORY_MAX) nav2LogHistory.shift();
-        nav2LogIndex = nav2LogHistory.length - 1;
-        renderNav2Logs();
-    } else {
-        previous.ts = entry.ts;
-        nav2LogIndex = nav2LogHistory.length - 1;
-        renderNav2Logs();
-    }
-
-    needsDraw = true;
-    if (Number(msg.level) >= ROSOUT_ERROR) notify('ERROR', '[' + msg.name + '] ' + msg.msg);
-}
-
-function formatNav2LogTime(ts) {
-    try {
-        return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    } catch (_) { return '--:--:--'; }
-}
-
-function renderNav2Logs() {
-    const card = document.getElementById('nav2-log-card');
-    const count = document.getElementById('nav2-log-count');
-    const prev = document.getElementById('nav2-log-prev');
-    const next = document.getElementById('nav2-log-next');
-    if (!card) return;
-
-    const total = nav2LogHistory.length;
-    if (count) count.textContent = total + (total === 1 ? ' stored' : ' stored');
-
-    if (!total) {
-        card.innerHTML = '<div class="nav2-log-empty">No Nav2 warnings or errors yet.</div>';
-        if (prev) prev.disabled = true;
-        if (next) next.disabled = true;
-        return;
-    }
-
-    nav2LogIndex = Math.max(0, Math.min(nav2LogIndex, total - 1));
-    const entry = nav2LogHistory[nav2LogIndex];
-    const levelClass = String(entry.level || 'WARN').toLowerCase();
-    card.innerHTML = `
-        <div class="nav2-log-top">
-            <span class="nav2-log-level ${levelClass}">${entry.level}</span>
-            <span class="nav2-log-position mono">${nav2LogIndex + 1} / ${total}</span>
-        </div>
-        <div class="nav2-log-node">${escapeHtml(entry.node)}</div>
-        <div class="nav2-log-message">${escapeHtml(entry.text)}</div>
-        <div class="nav2-log-time mono">${formatNav2LogTime(entry.ts)}</div>`;
-
-    if (prev) prev.disabled = total <= 1;
-    if (next) next.disabled = total <= 1;
-}
-
-function previousNav2Log() {
-    if (!nav2LogHistory.length) return;
-    nav2LogIndex = (nav2LogIndex - 1 + nav2LogHistory.length) % nav2LogHistory.length;
-    renderNav2Logs();
-}
-
-function nextNav2Log() {
-    if (!nav2LogHistory.length) return;
-    nav2LogIndex = (nav2LogIndex + 1) % nav2LogHistory.length;
-    renderNav2Logs();
-}
-
-function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>'"]/g, ch => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-    }[ch]));
-}
-
-window.previousNav2Log = previousNav2Log;
-window.nextNav2Log = nextNav2Log;
-
-function onBTLogMsg(msg) {
-    const events = (msg && msg.event_log) || [];
-    let changed = false;
-    events.forEach((e) => {
-        if (e.current_status === 'RUNNING') { nav2ActiveNode = e.node_name; changed = true; }
-    });
-    if (!changed) return;
-    nav2StatusMsgAt = Date.now();
-    applyNav2Status();
-}
-
-function onNav2GoalStatusMsg(msg) {
-    const list = (msg && msg.status_list) || [];
-    if (!list.length) return;
-    const last = list[list.length - 1];
-    const code = NAV2_GOAL_STATUS_NAMES[last.status] || null;
-    if (!code) return;
-    nav2GoalStatusCode = code;
-    nav2StatusMsgAt = Date.now();
-    applyNav2Status();
-}
-const mapCanvasOff = document.createElement('canvas');
-let odom = null;
-let odomPose = null;
-let robot = null;
-let poseDirty = false;
-let baseFrame = 'base_link';
-let currentCmdVel = { linear: 0, angular: 0 };
-let cmdVelAt = 0;
-
-let activeNavBtn = null;
-let navInitTimeout = null;
-
-function setNavLoading(btn) {
-    if (activeNavBtn && activeNavBtn !== btn) {
-        activeNavBtn.classList.remove('loading');
-        activeNavBtn.disabled = false;
-    }
-    activeNavBtn = btn;
-    if (activeNavBtn) {
-        activeNavBtn.classList.add('loading');
-        activeNavBtn.disabled = true;
-    }
-}
-
-function clearNavLoading() {
-    if (navInitTimeout) { clearTimeout(navInitTimeout); navInitTimeout = null; }
-    if (activeNavBtn) {
-        activeNavBtn.classList.remove('loading');
-        activeNavBtn.disabled = false;
-        activeNavBtn = null;
-    }
-}
-
-function startNavWatchdog() {
-    if (navInitTimeout) clearTimeout(navInitTimeout);
-    navInitTimeout = setTimeout(async () => {
-        navInitTimeout = null;
-        clearNavLoading();
-        if (nav2StatusFresh() && (nav2GoalStatusCode === 'EXECUTING' || nav2GoalStatusCode === 'ACCEPTED')) {
-            return;
-        }
-        navStatus = 'Aborted';
-        missionGoal = null;
-        latestPlan = [];
-        ignorePlansUntil = Date.now() + 1500;
-        needsDraw = true;
-        try { await postJSON('/abort'); } catch (e) {}
-        notify('ERROR', 'Nav2 did not produce a path within ' + (CFG.planTimeoutMs / 1000) + ' s. Mission aborted.');
-    }, CFG.planTimeoutMs);
-}
-
-function formatSigned(v, digits = 2) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return '—';
-    if (Math.abs(n) < 0.0005) return '0.' + '0'.repeat(digits);
-    return (n > 0 ? '+' : '') + n.toFixed(digits);
-}
-
-function yawFromQuat(q) {
-    if (!q) return 0;
-    const x = q.x || 0, y = q.y || 0, z = q.z || 0, w = (q.w === undefined ? 1 : q.w);
-    return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
-}
-
-function toInt8Array(d) {
-    if (typeof d === 'string') {
-        const bin = atob(d), a = new Int8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
-        return a;
-    }
-    return d || [];
-}
-
-// =====================================================================
-//  ROS 2 BRIDGE
-// =====================================================================
-let ros = null, rosConnected = false, rosTopics = [], joyTopic = null, rosRetryTimer = null;
-let lastMapAt = 0, rosConnectedAt = 0;
-
-function setRosBadge(connected, text) {
-    const b = document.getElementById('ros-status');
-    if (!b) return;
-    b.textContent = text;
-    b.className = 'status-badge' + (connected ? ' connected' : '');
-}
-
-function rosSubscribe(name, type, cb, opts) {
-    const t = new ROSLIB.Topic(Object.assign({ ros, name, messageType: type }, opts || {}));
-    t.subscribe(cb);
-    rosTopics.push(t);
-    return t;
-}
-
-const tfEdges = new Map();
-const stripSlash = (s) => String(s || '').replace(/^\/+/, '');
 
 function onTF(msg) {
-    const list = (msg && msg.transforms) || [];
-    for (const t of list) {
-        const child = stripSlash(t.child_frame_id), parent = stripSlash(t.header && t.header.frame_id);
-        if (!child || !parent) continue;
-        const tr = t.transform.translation;
-        tfEdges.set(child, { parent, x: tr.x, y: tr.y, yaw: yawFromQuat(t.transform.rotation) });
-    }
-    poseDirty = true;
-}
-
-function lookupInMap(frame) {
-    frame = stripSlash(frame);
-    if (frame === MAP_FRAME) return { x: 0, y: 0, yaw: 0 };
-    const chain = [];
-    let f = frame, guard = 0;
-    while (f !== MAP_FRAME && guard++ < 16) {
-        const e = tfEdges.get(f);
-        if (!e) return null;
-        chain.push(e);
-        f = e.parent;
-    }
-    if (f !== MAP_FRAME) return null;
-    let x = 0, y = 0, yaw = 0;
-    for (let i = chain.length - 1; i >= 0; i--) {
-        const e = chain[i], c = Math.cos(yaw), s = Math.sin(yaw);
-        x += c * e.x - s * e.y;
-        y += s * e.x + c * e.y;
-        yaw += e.yaw;
-    }
-    return { x, y, yaw };
-}
-
-function refreshRobotPose() {
-    poseDirty = false;
-    const p = lookupInMap(baseFrame);
-    if (p) robot = p;
-    else if (odomPose) robot = odomPose;
-    needsDraw = true;
-}
-
-let latestLocalCostmap = null, latestGlobalCostmap = null;
-let localCostmapDirty = false, globalCostmapDirty = false;
-const localCostmapCanvasOff = document.createElement('canvas');
-const globalCostmapCanvasOff = document.createElement('canvas');
-
-function getCostmapColor(v) {
-    if (v <= 0 || v === 255 || v === -1) return [0, 0, 0, 0];
-    if (v >= 100) return [227, 0, 53, 220];
-    const t = Math.min(v, 99) / 99;
-    let r, g, b;
-    if (t < 0.33) {
-        const f = t / 0.33;
-        r = 0; g = Math.round(200 * f); b = 255;
-    } else if (t < 0.66) {
-        const f = (t - 0.33) / 0.33;
-        r = Math.round(255 * f); g = 200; b = Math.round(255 * (1 - f));
-    } else {
-        const f = (t - 0.66) / 0.34;
-        r = 255; g = Math.round(200 * (1 - f)); b = 0;
-    }
-    const alpha = Math.round(70 + t * 150);
-    return [r, g, b, alpha];
-}
-
-function rebuildCostmapImage(costmap, canvasOff) {
-    if (!costmap) return;
-    canvasOff.width = costmap.w; canvasOff.height = costmap.h;
-    const ctx = canvasOff.getContext('2d');
-    const img = ctx.createImageData(costmap.w, costmap.h), d = img.data;
-    for (let j = 0; j < costmap.h; j++) {
-        for (let i = 0; i < costmap.w; i++) {
-            const v = costmap.data[j * costmap.w + i], k = (j * costmap.w + i) * 4;
-            const [r, g, b, a] = getCostmapColor(v);
-            d[k] = r; d[k + 1] = g; d[k + 2] = b; d[k + 3] = a;
-        }
-    }
-    ctx.putImageData(img, 0, 0);
-}
-function rebuildLocalCostmapImage() { rebuildCostmapImage(latestLocalCostmap, localCostmapCanvasOff); }
-function rebuildGlobalCostmapImage() { rebuildCostmapImage(latestGlobalCostmap, globalCostmapCanvasOff); }
-
-function onLocalCostmapMsg(msg) {
-    const info = msg.info;
-    if (!info || !info.width || !info.height) return;
-    latestLocalCostmap = {
-        w: info.width, h: info.height, res: info.resolution,
-        ox: info.origin.position.x, oy: info.origin.position.y,
-        yaw: yawFromQuat(info.origin.orientation), data: toInt8Array(msg.data)
+  msg.transforms.forEach(t => {
+    tfs[t.child_frame_id.replace(/^\//, '')] = {
+      parent: t.header.frame_id.replace(/^\//, ''),
+      x: t.transform.translation.x, y: t.transform.translation.y,
+      yaw: yawOf(t.transform.rotation),
     };
-    localCostmapDirty = true; needsDraw = true;
+  });
+  dirty();
 }
 
-function onGlobalCostmapMsg(msg) {
-    const info = msg.info;
-    if (!info || !info.width || !info.height) return;
-    latestGlobalCostmap = {
-        w: info.width, h: info.height, res: info.resolution,
-        ox: info.origin.position.x, oy: info.origin.position.y,
-        yaw: yawFromQuat(info.origin.orientation), data: toInt8Array(msg.data)
-    };
-    globalCostmapDirty = true; needsDraw = true;
-}
-
-function onMapMsg(msg) {
-    const info = msg.info;
-    if (!info || !info.width || !info.height) return;
-    lastMapAt = Date.now();
-    latestMap = {
-        w: info.width,
-        h: info.height,
-        res: info.resolution,
-        ox: info.origin.position.x,
-        oy: info.origin.position.y,
-        yaw: yawFromQuat(info.origin.orientation),
-        data: toInt8Array(msg.data)
-    };
-    mapImageDirty = true;
-    needsDraw = true;
-}
-
-function onOdomMsg(msg) {
-    const pos = msg.pose.pose.position;
-    const tw = msg.twist.twist.linear;
-    if (msg.child_frame_id) baseFrame = stripSlash(msg.child_frame_id);
-    odomPose = { x: pos.x, y: pos.y, yaw: yawFromQuat(msg.pose.pose.orientation) };
-    odom = { speed: Math.hypot(tw.x || 0, tw.y || 0) };
-    poseDirty = true;
-}
-
-function onPlanMsg(msg) {
-    if (Date.now() < ignorePlansUntil) return;
-    const poses = (msg && msg.poses) || [];
-    latestPlan = poses.map(p => ({
-        x: p.pose.position.x, y: p.pose.position.y, yaw: yawFromQuat(p.pose.orientation)
-    }));
-    if (latestPlan.length > 1) {
-        clearNavLoading();
-        if (navStatus !== 'Navigating') {
-            navStatus = 'Navigating';
-            if (!missionGoal) {
-                const last = latestPlan[latestPlan.length - 1];
-                missionGoal = { x: last.x, y: last.y };
-            }
-        }
-    }
-    needsDraw = true;
-}
-
-function subscribeAllTopics() {
-    rosSubscribe(TOPICS.map, 'nav_msgs/OccupancyGrid', onMapMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.odom, 'nav_msgs/Odometry', onOdomMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.tf, 'tf2_msgs/TFMessage', onTF);
-    rosSubscribe(TOPICS.tfStatic, 'tf2_msgs/TFMessage', onTF);
-    rosSubscribe(TOPICS.cmdVel, 'geometry_msgs/Twist', (msg) => {
-        currentCmdVel = { linear: msg.linear.x, angular: msg.angular.z };
-        cmdVelAt = performance.now();
-        needsDraw = true;
-    }, { queue_length: 1 });
-    rosSubscribe(TOPICS.plan, 'nav_msgs/Path', onPlanMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.localCostmap, 'nav_msgs/OccupancyGrid', onLocalCostmapMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.globalCostmap, 'nav_msgs/OccupancyGrid', onGlobalCostmapMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.scan, 'sensor_msgs/LaserScan', onScanPointCloudMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.nav2Status, 'action_msgs/GoalStatusArray', onNav2GoalStatusMsg, { queue_length: 1 });
-    rosSubscribe(TOPICS.btLog, 'nav2_msgs/BehaviorTreeLog', onBTLogMsg, { queue_length: 5 });
-    rosSubscribe(TOPICS.rosout, 'rcl_interfaces/Log', onRosoutMsg, { queue_length: 10 });
-
-    joyTopic = new ROSLIB.Topic({ ros, name: TOPICS.joy, messageType: 'geometry_msgs/Twist' });
-    joyTopic.advertise();
-}
-
-function initROSBridge() {
-    clearTimeout(rosRetryTimer);
-    if (typeof ROSLIB === 'undefined') {
-        setRosBadge(false, 'ROSLIB missing');
-        notify('ERROR', 'roslib.js failed to load - ROS features are unavailable.');
-        return;
-    }
-    setRosBadge(false, 'ROS Connecting…');
-    const thisRos = new ROSLIB.Ros({ url: ROSBRIDGE_WS_URL });
-    ros = thisRos;
-
-    thisRos.on('connection', () => {
-        if (thisRos !== ros) return;
-        rosConnected = true;
-        rosConnectedAt = Date.now();
-        setRosBadge(true, 'ROS Connected');
-        notify('INFO', 'Connected to ROS bridge.');
-        subscribeAllTopics();
-    });
-    thisRos.on('error', (err) => {
-        if (thisRos !== ros) return;
-        console.error('ROS bridge error:', err);
-        if (!rosConnected) setRosBadge(false, 'ROS Error');
-    });
-    thisRos.on('close', () => {
-        if (thisRos !== ros) return;
-        const wasUp = rosConnected;
-        rosConnected = false;
-        rosTopics = [];
-        joyTopic = null;
-        setRosBadge(false, 'ROS Disconnected');
-        if (wasUp) notify('WARNING', 'ROS bridge connection lost. Reconnecting…');
-        rosRetryTimer = setTimeout(initROSBridge, CFG.rosRetryMs);
-    });
-}
-
-// =====================================================================
-//  REST API
-// =====================================================================
-async function postJSON(urlPath, body = {}) {
-    let response;
-    try {
-        response = await fetch(REST_API_BASE + urlPath, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-    } catch (e) {
-        throw new Error('Cannot reach the rover API (' + REST_API_BASE + ')');
-    }
-    const raw = await response.text();
-    let data = {};
-    try { data = raw ? JSON.parse(raw) : {}; } catch (e) { data = { raw }; }
-    if (!response.ok) {
-        let detail = data && data.detail;
-        if (detail && typeof detail !== 'string') detail = JSON.stringify(detail);
-        throw new Error(detail || (data && data.message) || ('HTTP ' + response.status));
-    }
-    return data;
-}
-
-// =====================================================================
-//  SLAM map canvas & interaction
-// =====================================================================
-const mapWrap = document.getElementById('map-wrapper');
-const mapCanvas = document.getElementById('map-canvas');
-const view = { vx: 0, vy: 0, s: 30 };
-let follow = true, viewFitted = false;
-let clickMode = 'single';
-let singleTarget = null;
-let waypointsData = [];
-let activeGoal = null, panState = null;
-
-const mapSize = () => ({ W: mapCanvas.clientWidth, H: mapCanvas.clientHeight });
-function w2s(x, y) { const { W, H } = mapSize(); return [W / 2 - (y - view.vy) * view.s, H / 2 - (x - view.vx) * view.s]; }
-function s2w(sx, sy) { const { W, H } = mapSize(); return { x: view.vx - (sy - H / 2) / view.s, y: view.vy - (sx - W / 2) / view.s }; }
-
-function fitMapView() {
-    if (!latestMap) return;
-    const m = latestMap, c = Math.cos(m.yaw), s = Math.sin(m.yaw);
-    const cs = [[0, 0], [m.w, 0], [0, m.h], [m.w, m.h]].map(([i, j]) =>
-        [m.ox + m.res * (i * c - j * s), m.oy + m.res * (i * s + j * c)]);
-    const xs = cs.map(p => p[0]), ys = cs.map(p => p[1]);
-    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-    const { W, H } = mapSize();
-    view.vx = (minX + maxX) / 2; view.vy = (minY + maxY) / 2;
-    view.s = Math.max(2, Math.min(W / (maxY - minY || 1), H / (maxX - minX || 1)) * 0.94);
-    follow = true; document.getElementById('follow-btn').classList.add('on');
-    viewFitted = true; needsDraw = true;
-}
-function toggleFollow() {
-    follow = !follow;
-    document.getElementById('follow-btn').classList.toggle('on', follow);
-    needsDraw = true;
-}
-
-function toggleSidebar() {
-    document.body.classList.toggle('sidebar-collapsed');
-    const button = document.getElementById('sidebar-toggle-btn');
-    const collapsed = document.body.classList.contains('sidebar-collapsed');
-    if (button) {
-        button.setAttribute('aria-label', collapsed ? 'Show navigation' : 'Hide navigation');
-        button.title = collapsed ? 'Show navigation' : 'Hide navigation';
-    }
-    requestAnimationFrame(() => {
-        mapImageDirty = true;
-        needsDraw = true;
-        if (typeof mvDraw === 'function') mvDraw();
-    });
-}
-
-function togglePanelFullscreen(panel, button) {
-    const isFullscreen = panel.classList.toggle('panel-fullscreen');
-    button.textContent = isFullscreen ? '×' : '⛶';
-    button.title = isFullscreen ? 'Exit fullscreen' : 'Fullscreen panel';
-    button.setAttribute('aria-label', button.title);
-    document.body.classList.toggle('panel-is-fullscreen', isFullscreen);
-    requestAnimationFrame(() => {
-        mapImageDirty = true;
-        needsDraw = true;
-        if (typeof mvDraw === 'function') mvDraw();
-    });
-}
-
-function setupPanelUtilities() {
-    const panels = Array.from(document.querySelectorAll('.panel'));
-    panels.forEach((panel, index) => {
-        const header = panel.querySelector(':scope > .panel-hd');
-        if (!header) return;
-        panel.dataset.panelId = panel.dataset.panelId || 'panel-' + index;
-        panel.draggable = false;
-
-        let tools = header.querySelector(':scope > .panel-tools');
-        if (!tools) {
-            tools = document.createElement('div');
-            tools.className = 'panel-tools';
-            header.appendChild(tools);
-        }
-        const dragHandle = document.createElement('button');
-        dragHandle.type = 'button';
-        dragHandle.className = 'panel-drag-handle';
-        dragHandle.textContent = '☰';
-        dragHandle.title = 'Press and drag to move panel';
-        dragHandle.setAttribute('aria-label', dragHandle.title);
-        dragHandle.draggable = true;
-        dragHandle.addEventListener('pointerdown', (event) => {
-            event.stopPropagation();
-            panel.classList.add('panel-move-armed');
-            dragHandle.classList.add('active');
-        });
-        dragHandle.addEventListener('click', (event) => event.stopPropagation());
-        dragHandle.addEventListener('dragstart', (event) => {
-            if (!panel.classList.contains('panel-move-armed')) {
-                event.preventDefault();
-                return;
-            }
-            panel.classList.add('panel-dragging');
-            document.querySelector('.workspace').classList.add('is-reordering');
-            event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/plain', panel.dataset.panelId);
-        });
-        dragHandle.addEventListener('dragend', () => {
-            panel.classList.remove('panel-dragging');
-            panel.classList.remove('panel-move-armed');
-            dragHandle.classList.remove('active');
-            document.querySelector('.workspace').classList.remove('is-reordering');
-            document.querySelectorAll('.panel-drop-target').forEach((item) => item.classList.remove('panel-drop-target'));
-        });
-        dragHandle.addEventListener('pointerup', () => {
-            if (!panel.classList.contains('panel-dragging')) {
-                panel.classList.remove('panel-move-armed');
-                dragHandle.classList.remove('active');
-            }
-        });
-        header.insertBefore(dragHandle, header.firstChild);
-
-        const fullscreen = document.createElement('button');
-        fullscreen.type = 'button';
-        fullscreen.className = 'tool-btn panel-action-btn';
-        fullscreen.textContent = '⛶';
-        fullscreen.title = 'Fullscreen panel';
-        fullscreen.setAttribute('aria-label', fullscreen.title);
-        fullscreen.draggable = false;
-        fullscreen.addEventListener('click', (event) => {
-            event.stopPropagation();
-            togglePanelFullscreen(panel, fullscreen);
-        });
-        tools.appendChild(fullscreen);
-
-        panel.addEventListener('dragover', (event) => {
-            const dragged = document.querySelector('.panel-dragging');
-            if (!dragged || dragged === panel || dragged.parentElement !== panel.parentElement) return;
-            event.preventDefault();
-            panel.classList.add('panel-drop-target');
-            const before = event.clientY < panel.getBoundingClientRect().top + panel.offsetHeight / 2;
-            panel.parentElement.insertBefore(dragged, before ? panel : panel.nextSibling);
-        });
-        panel.addEventListener('dragleave', () => panel.classList.remove('panel-drop-target'));
-        panel.addEventListener('drop', (event) => {
-            event.preventDefault();
-            panel.classList.remove('panel-drop-target');
-        });
-    });
-}
-
-function rebuildMapImage() {
-    const m = latestMap; if (!m) return;
-    mapCanvasOff.width = m.w; mapCanvasOff.height = m.h;
-    const ctx = mapCanvasOff.getContext('2d');
-    const img = ctx.createImageData(m.w, m.h), d = img.data;
-    const parse = (hex) => {
-        const c = document.createElement('canvas').getContext('2d'); c.fillStyle = hex; c.fillRect(0, 0, 1, 1);
-        return c.getImageData(0, 0, 1, 1).data;
-    };
-    const free = parse(theme['--map-free']), occ = parse(theme['--map-occ']);
-    const OCC_THRESHOLD = 65;
-    for (let j = 0; j < m.h; j++) {
-        for (let i = 0; i < m.w; i++) {
-            const v = m.data[j * m.w + i], k = (j * m.w + i) * 4;
-            if (v < 0) { d[k + 3] = 0; }
-            else {
-                const col = v >= OCC_THRESHOLD ? occ : free;
-                d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2];
-                d[k + 3] = 255;
-            }
-        }
-    }
-    ctx.putImageData(img, 0, 0);
-    document.getElementById('map-empty').style.display = 'none';
-    document.getElementById('map-meta').textContent =
-        '· ' + m.w + '×' + m.h + ' · ' + m.res.toFixed(3) + ' m/cell';
-}
-
-function drawArrow(ctx, x, y, yawRad, color, label, size) {
-    const p = w2s(x, y), q = w2s(x + Math.cos(yawRad), y + Math.sin(yawRad));
-    const ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
-    ctx.save();
-    ctx.translate(p[0], p[1]); ctx.rotate(ang);
-    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size, 0); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(size + 9, 0); ctx.lineTo(size - 2, -6); ctx.lineTo(size - 2, 6); ctx.closePath(); ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill();
-    ctx.strokeStyle = theme['--panel']; ctx.lineWidth = 1.5; ctx.stroke();
-    if (label) {
-        ctx.font = '700 11px Roboto, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-        ctx.fillStyle = color; ctx.fillText(label, p[0], p[1] - 9);
-    }
-}
-
-function drawPathWithArrows(ctx, points, color) {
-    if (!points || points.length < 2) return;
-
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    points.forEach((pt, idx) => {
-        const sPt = w2s(pt.x, pt.y);
-        if (idx === 0) ctx.moveTo(sPt[0], sPt[1]);
-        else ctx.lineTo(sPt[0], sPt[1]);
-    });
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    const spacingPx = 45;
-    let accumulatedDist = 0;
-    for (let i = 0; i < points.length - 1; i++) {
-        const p1 = w2s(points[i].x, points[i].y);
-        const p2 = w2s(points[i + 1].x, points[i + 1].y);
-        const segLen = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
-        if (segLen === 0) continue;
-
-        const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
-        let currentDist = spacingPx - (accumulatedDist % spacingPx);
-        while (currentDist < segLen) {
-            const t = currentDist / segLen;
-            const cx = p1[0] + (p2[0] - p1[0]) * t;
-            const cy = p1[1] + (p2[1] - p1[1]) * t;
-            ctx.save();
-            ctx.translate(cx, cy);
-            ctx.rotate(angle);
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.moveTo(-5, -4); ctx.lineTo(4, 0); ctx.lineTo(-5, 4);
-            ctx.closePath();
-            ctx.fill();
-            ctx.restore();
-            currentDist += spacingPx;
-        }
-        accumulatedDist += segLen;
-    }
-}
-
-function drawAnimatedInterimPath(ctx, from, to, color) {
-    const p1 = w2s(from.x, from.y), p2 = w2s(to.x, to.y);
-    const dashLen = 10, gapLen = 7;
-    const nowMs = performance.now();
-    color = color || '#ffb020';
-
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
-    ctx.setLineDash([dashLen, gapLen]);
-    ctx.lineDashOffset = -((nowMs / 40) % (dashLen + gapLen));
-    ctx.beginPath();
-    ctx.moveTo(p1[0], p1[1]);
-    ctx.lineTo(p2[0], p2[1]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-
-    const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
-    const pulse = 1 + 0.15 * Math.sin(nowMs / 220);
-    ctx.save();
-    ctx.translate(p2[0], p2[1]);
-    ctx.rotate(angle);
-    ctx.scale(pulse, pulse);
-    ctx.fillStyle = color;
-    ctx.strokeStyle = theme['--panel'];
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(16, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath();
-    ctx.fill(); ctx.stroke();
-    ctx.restore();
-
-    ctx.font = '700 11px Roboto, sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillStyle = color;
-    ctx.fillText('PLANNING…', p2[0], p2[1] - 16);
-}
-
-function drawMap() {
-    const dpr = window.devicePixelRatio || 1;
-    const W = mapCanvas.clientWidth, H = mapCanvas.clientHeight;
-    if (!W || !H) return;
-    if (mapCanvas.width !== Math.round(W * dpr) || mapCanvas.height !== Math.round(H * dpr)) {
-        mapCanvas.width = Math.round(W * dpr); mapCanvas.height = Math.round(H * dpr);
-    }
-    const ctx = mapCanvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = theme['--map-bg']; ctx.fillRect(0, 0, W, H);
-
-    if (follow && robot) { view.vx = robot.x; view.vy = robot.y; }
-
-    function drawGrid(m, offCanvas) {
-        if (!m) return;
-        const c = Math.cos(m.yaw), s = Math.sin(m.yaw), k = m.res * view.s;
-        ctx.save();
-        ctx.imageSmoothingEnabled = false;
-        ctx.transform(-k * s, -k * c, -k * c, k * s,
-            W / 2 - (m.oy - view.vy) * view.s, H / 2 - (m.ox - view.vx) * view.s);
-        ctx.drawImage(offCanvas, 0, 0);
-        ctx.restore();
-    }
-    if (layerVis.map && latestMap) drawGrid(latestMap, mapCanvasOff);
-    if (layerVis.globalCostmap && latestGlobalCostmap) drawGrid(latestGlobalCostmap, globalCostmapCanvasOff);
-    if (layerVis.localCostmap && latestLocalCostmap) drawGrid(latestLocalCostmap, localCostmapCanvasOff);
-
-    if (layerVis.scan && latestScanPoints && latestScanPoints.length) {
-        ctx.fillStyle = '#ff6f00';
-        for (let i = 0; i < latestScanPoints.length; i++) {
-            const p = w2s(latestScanPoints[i].x, latestScanPoints[i].y);
-            ctx.fillRect(p[0] - 2, p[1] - 2, 4, 4);
-        }
-    }
-
-    const step = view.s >= 6 ? 1 : (view.s >= 1.5 ? 5 : 10);
-    document.getElementById('map-grid-label').textContent = 'Grid ' + step + ' m';
-    const a = s2w(0, 0), b = s2w(W, H);
-    const xLo = Math.min(a.x, b.x), xHi = Math.max(a.x, b.x), yLo = Math.min(a.y, b.y), yHi = Math.max(a.y, b.y);
-    ctx.strokeStyle = theme['--map-grid']; ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = Math.ceil(xLo / step) * step; x <= xHi; x += step) {
-        const sy = Math.round(w2s(x, 0)[1]) + 0.5; ctx.moveTo(0, sy); ctx.lineTo(W, sy);
-    }
-    for (let y = Math.ceil(yLo / step) * step; y <= yHi; y += step) {
-        const sx = Math.round(w2s(0, y)[0]) + 0.5; ctx.moveTo(sx, 0); ctx.lineTo(sx, H);
-    }
-    ctx.stroke();
-
-    const o = w2s(0, 0), ax = w2s(1, 0), ay = w2s(0, 1);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#e5484d'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ax[0], ax[1]); ctx.stroke();
-    ctx.strokeStyle = '#30a46c'; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(ay[0], ay[1]); ctx.stroke();
-
-    if (layerVis.plan && latestPlan && latestPlan.length > 0) {
-        drawPathWithArrows(ctx, latestPlan, theme['--primary']);
-        const finalPt = latestPlan[latestPlan.length - 1];
-        drawArrow(ctx, finalPt.x, finalPt.y, finalPt.yaw, theme['--danger'], 'GOAL', 28);
-    } else if (layerVis.plan && navStatus === 'Planning' && missionGoal && robot) {
-        drawAnimatedInterimPath(ctx, robot, missionGoal);
-    }
-
-    const WPCOL = '#E8A317', TCOL = '#0077ff';
-    if (waypointsData.length > 1) {
-        ctx.strokeStyle = WPCOL; ctx.lineWidth = 1.2; ctx.setLineDash([4, 4]); ctx.beginPath();
-        waypointsData.forEach((wp, i) => { const p = w2s(wp.x, wp.y); i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); });
-        ctx.stroke(); ctx.setLineDash([]);
-    }
-    waypointsData.forEach((wp, i) => drawArrow(ctx, wp.x, wp.y, wp.yaw * Math.PI / 180, WPCOL, String(i + 1), 26));
-    if (singleTarget) drawArrow(ctx, singleTarget.x, singleTarget.y, singleTarget.yaw * Math.PI / 180, TCOL, 'T', 26);
-    if (activeGoal) drawArrow(ctx, activeGoal.x, activeGoal.y, activeGoal.yaw * Math.PI / 180,
-        clickMode === 'single' ? TCOL : WPCOL, clickMode === 'single' ? 'T' : String(waypointsData.length + 1), 26);
-
-    if (robot) {
-        const p = w2s(robot.x, robot.y), q = w2s(robot.x + Math.cos(robot.yaw), robot.y + Math.sin(robot.yaw));
-        const ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
-        const r = Math.max(8, Math.min(16, 0.3 * view.s));
-        const col = theme['--success'];
-
-        ctx.fillStyle = col; ctx.globalAlpha = 0.18;
-        ctx.beginPath(); ctx.arc(p[0], p[1], r * 2, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
-
-        ctx.save(); ctx.translate(p[0], p[1]); ctx.rotate(ang);
-        ctx.fillStyle = col; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(r * 1.6, 0); ctx.lineTo(-r * 0.9, -r * 0.95); ctx.lineTo(-r * 0.4, 0); ctx.lineTo(-r * 0.9, r * 0.95); ctx.closePath();
-        ctx.fill(); ctx.stroke();
-
-        if (Math.abs(currentCmdVel.linear) > 0.02) {
-            const linLen = currentCmdVel.linear * 35;
-            const dir = Math.sign(currentCmdVel.linear);
-            ctx.strokeStyle = '#38bdf8';
-            ctx.fillStyle = '#38bdf8';
-            ctx.lineWidth = 2.5;
-            ctx.beginPath();
-            ctx.moveTo(r * 1.8, 0);
-            ctx.lineTo(r * 1.8 + linLen, 0);
-            ctx.stroke();
-
-            const headX = r * 1.8 + linLen;
-            ctx.beginPath();
-            ctx.moveTo(headX + dir * 6, 0);
-            ctx.lineTo(headX, -5);
-            ctx.lineTo(headX, 5);
-            ctx.fill();
-        }
-
-        if (Math.abs(currentCmdVel.angular) > 0.05) {
-            const arcR = r * 2.5;
-            ctx.strokeStyle = '#facc15';
-            ctx.fillStyle = '#facc15';
-            ctx.lineWidth = 2.5;
-
-            const dir = Math.sign(currentCmdVel.angular);
-            const sweepAng = Math.min(Math.max(Math.abs(currentCmdVel.angular) * 0.5, 0.3), Math.PI / 1.2);
-
-            ctx.beginPath();
-            ctx.arc(0, 0, arcR, 0, -dir * sweepAng, dir > 0);
-            ctx.stroke();
-
-            const endAngle = -dir * sweepAng;
-            const ex = arcR * Math.cos(endAngle);
-            const ey = arcR * Math.sin(endAngle);
-
-            ctx.save();
-            ctx.translate(ex, ey);
-            ctx.rotate(endAngle - (dir * Math.PI / 2));
-            ctx.beginPath();
-            ctx.moveTo(0, 0);
-            ctx.lineTo(-5, -3);
-            ctx.lineTo(-5, 3);
-            ctx.closePath();
-            ctx.fill();
-            ctx.restore();
-        }
-        ctx.restore();
-
-        drawNav2StageTag(ctx, p[0], p[1], r);
-        drawNav2ErrorBubble(ctx, p[0], p[1], r);
-    }
-}
-
-function drawNav2StageTag(ctx, x, y, r) {
-    const label = nav2Stage || navStatus;
-    if (!label || label === 'Idle') return;
-    const tagCol = {
-        Navigating: '#38bdf8', Planning: '#facc15', Recovering: '#fb923c',
-        Reached: '#30a46c', Aborted: '#e5484d', Failed: '#e5484d', Canceled: '#94a3b8'
-    };
-    const key = Object.keys(tagCol).find((k) => label.startsWith(k)) || navStatus;
-    const color = tagCol[key] || '#94a3b8';
-
-    ctx.save();
-    ctx.font = '700 10px Roboto, sans-serif';
-    const textW = ctx.measureText(label).width;
-    const padX = 6, padY = 3, boxW = textW + padX * 2, boxH = 15;
-    const tx = x + r * 2 + 4, ty = y - boxH / 2;
-
-    ctx.fillStyle = 'rgba(15,17,20,.88)';
-    ctx.strokeStyle = color; ctx.lineWidth = 1.2;
-    roundRectPath(ctx, tx, ty, boxW, boxH, 6);
-    ctx.fill(); ctx.stroke();
-
-    ctx.fillStyle = color;
-    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(label, tx + padX, ty + boxH / 2 + 0.5);
-    ctx.restore();
-}
-
-function drawNav2ErrorBubble(ctx, x, y, r) {
-    if (!nav2LastError) return;
-    const age = Date.now() - nav2LastError.ts;
-    if (age > NAV2_ERROR_BUBBLE_MS) return;
-
-    const maxCharsPerLine = 34;
-    const raw = String(nav2LastError.text || '').trim();
-    const lines = wrapText(raw, maxCharsPerLine).slice(0, 4);
-    const header = '⚠ ' + nav2LastError.node;
-
-    ctx.save();
-    ctx.font = '700 10px Roboto, sans-serif';
-    const headerW = ctx.measureText(header).width;
-    ctx.font = '400 10px Roboto, sans-serif';
-    const lineW = Math.max(...lines.map((l) => ctx.measureText(l).width), 0);
-    const boxW = Math.min(260, Math.max(headerW, lineW) + 20);
-    const lineH = 13;
-    const boxH = 20 + lines.length * lineH;
-    const bx = x - boxW / 2, by = y - r * 2 - boxH - 14;
-
-    const alpha = age > NAV2_ERROR_BUBBLE_MS - 2000 ? Math.max(0, (NAV2_ERROR_BUBBLE_MS - age) / 2000) : 1;
-    ctx.globalAlpha = alpha;
-
-    ctx.fillStyle = 'rgba(40,14,16,.95)';
-    ctx.strokeStyle = '#e5484d'; ctx.lineWidth = 1.3;
-    roundRectPath(ctx, bx, by, boxW, boxH, 8);
-    ctx.fill(); ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(x - 7, by + boxH);
-    ctx.lineTo(x + 7, by + boxH);
-    ctx.lineTo(x, by + boxH + 10);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(40,14,16,.95)';
-    ctx.fill();
-    ctx.strokeStyle = '#e5484d'; ctx.stroke();
-
-    ctx.font = '700 10px Roboto, sans-serif';
-    ctx.fillStyle = '#ff8686';
-    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText(header, bx + 10, by + 8);
-
-    ctx.font = '400 10px Roboto, sans-serif';
-    ctx.fillStyle = '#f5d3d3';
-    lines.forEach((l, i) => ctx.fillText(l, bx + 10, by + 8 + 16 + i * lineH));
-
-    ctx.restore();
-}
-
-function roundRectPath(ctx, x, y, w, h, rad) {
-    ctx.beginPath();
-    ctx.moveTo(x + rad, y);
-    ctx.arcTo(x + w, y, x + w, y + h, rad);
-    ctx.arcTo(x + w, y + h, x, y + h, rad);
-    ctx.arcTo(x, y + h, x, y, rad);
-    ctx.arcTo(x, y, x + w, y, rad);
-    ctx.closePath();
-}
-
-function wrapText(text, maxChars) {
-    const words = text.split(/\s+/);
-    const lines = [];
-    let cur = '';
-    words.forEach((w) => {
-        if ((cur + ' ' + w).trim().length > maxChars) { if (cur) lines.push(cur); cur = w; }
-        else cur = (cur + ' ' + w).trim();
-    });
-    if (cur) lines.push(cur);
-    return lines;
-}
-
-function evtPos(evt) { const r = mapCanvas.getBoundingClientRect(); return [evt.clientX - r.left, evt.clientY - r.top]; }
-
-let poseActionPopup = null;
-
-function openPoseActionPopup(pose, evt, waypointIndex = -1) {
-    const popup = document.getElementById('map-pose-popup');
-    const poseText = document.getElementById('map-pose-popup-pose');
-    const singleActions = document.getElementById('map-pose-single-actions');
-    const waypointActions = document.getElementById('map-pose-waypoint-actions');
-    if (!popup || !pose) return;
-
-    poseActionPopup = { x: pose.x, y: pose.y, yaw: pose.yaw || 0, waypointIndex };
-    const isWaypoint = waypointIndex >= 0;
-    if (singleActions) singleActions.hidden = isWaypoint;
-    if (waypointActions) waypointActions.hidden = !isWaypoint;
-    poseText.textContent =
-        'X ' + pose.x.toFixed(2) +
-        ' | Y ' + pose.y.toFixed(2) +
-        ' | Yaw ' + (pose.yaw || 0).toFixed(1) + '°';
-
-    const margin = 10, pw = 230, ph = 175;
-    let left = evt.clientX + margin;
-    let top = evt.clientY + margin;
-    if (left + pw > window.innerWidth - margin) left = evt.clientX - pw - margin;
-    if (top + ph > window.innerHeight - margin) top = evt.clientY - ph - margin;
-
-    popup.style.left = Math.max(margin, left) + 'px';
-    popup.style.top = Math.max(margin, top) + 'px';
-    popup.classList.add('show');
-}
-
-function closePoseActionPopup() {
-    const popup = document.getElementById('map-pose-popup');
-    if (popup) popup.classList.remove('show');
-    poseActionPopup = null;
-}
-
-async function popupNavigateToPoint() {
-    if (!poseActionPopup) return;
-    const p = { ...poseActionPopup };
-    closePoseActionPopup();
-    singleTarget = p;
-    updateUIInputs(p.x, p.y, p.yaw);
-    needsDraw = true;
-    await sendGoalPose();
-}
-
-async function popupSetInitialCheckpoint() {
-    if (!poseActionPopup) return;
-    const p = { ...poseActionPopup };
-    closePoseActionPopup();
-    singleTarget = p;
-    updateUIInputs(p.x, p.y, p.yaw);
-    needsDraw = true;
-    await sendInitialPose();
-}
-
-function popupAddWaypoint() {
-    if (!poseActionPopup) return;
-    const p = { ...poseActionPopup };
-    closePoseActionPopup();
-    waypointsData.push(p);
-    updateWaypointsUI();
-    setClickMode('waypoint');
-    needsDraw = true;
-    notify('INFO', 'Waypoint ' + waypointsData.length + ' added at (' + p.x.toFixed(2) + ', ' + p.y.toFixed(2) + ').');
-}
-
-function popupCancelWaypoint() {
-    if (!poseActionPopup || poseActionPopup.waypointIndex < 0) return;
-    const index = poseActionPopup.waypointIndex;
-    const removed = waypointsData[index];
-    closePoseActionPopup();
-    if (!removed) return;
-    waypointsData.splice(index, 1);
-    updateWaypointsUI();
-    needsDraw = true;
-    notify('INFO', 'Waypoint cancelled.');
-}
-
-document.addEventListener('pointerdown', (evt) => {
-    const popup = document.getElementById('map-pose-popup');
-    if (popup && popup.classList.contains('show') && !popup.contains(evt.target) && !mapWrap.contains(evt.target)) {
-        closePoseActionPopup();
-    }
-});
-
-mapWrap.addEventListener('contextmenu', e => e.preventDefault());
-mapWrap.addEventListener('pointerdown', (evt) => {
-    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
-    mapWrap.setPointerCapture(evt.pointerId);
-    const [sx, sy] = evtPos(evt);
-    if (evt.button === 1 || evt.button === 2 || evt.shiftKey) {
-        panState = { sx, sy, vx: view.vx, vy: view.vy };
-        follow = false; document.getElementById('follow-btn').classList.remove('on');
-        return;
-    }
-    const w = s2w(sx, sy);
-    activeGoal = { x: w.x, y: w.y, yaw: 0 };
-    needsDraw = true;
-});
-mapWrap.addEventListener('pointermove', (evt) => {
-    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
-    const [sx, sy] = evtPos(evt);
-    const w = s2w(sx, sy);
-    document.getElementById('map-cursor').textContent = 'x ' + w.x.toFixed(2) + '  y ' + w.y.toFixed(2) + ' m';
-    if (panState) {
-        view.vy = panState.vy + (sx - panState.sx) / view.s;
-        view.vx = panState.vx + (sy - panState.sy) / view.s;
-        needsDraw = true;
-    } else if (activeGoal) {
-        const dx = w.x - activeGoal.x, dy = w.y - activeGoal.y;
-        if (Math.abs(dx) > 0.05 || Math.abs(dy) > 0.05) activeGoal.yaw = Math.atan2(dy, dx) * 180 / Math.PI;
-        needsDraw = true;
-    }
-});
-const endPointer = (evt) => {
-    if (evt.target.closest('#map-pose-popup') || evt.target.closest('#map-legend')) return;
-    if (panState) { panState = null; return; }
-    if (!activeGoal) return;
-    const g = activeGoal; activeGoal = null;
-
-    let waypointIndex = -1;
-    if (clickMode === 'single') {
-        singleTarget = g;
-        updateUIInputs(g.x, g.y, g.yaw);
-    } else {
-        waypointsData.push(g);
-        waypointIndex = waypointsData.length - 1;
-        updateWaypointsUI();
-    }
-    needsDraw = true;
-    openPoseActionPopup(g, evt, waypointIndex);
+// ===== view: pan / zoom =====
+let view = { s: 60, x: canvas.width / 2, y: canvas.height / 2 };
+let dragging = false, last = null, goalMode = false, goalDrag = null;
+const pos = e => {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) * canvas.width / r.width, (e.clientY - r.top) * canvas.height / r.height];
 };
-mapWrap.addEventListener('pointerup', endPointer);
-
-document.addEventListener('keydown', (evt) => {
-    if (evt.key === 'Escape') closePoseActionPopup();
+const pointers = new Map();
+let pinch = null;
+const pinchState = () => {
+  const [p, q] = [...pointers.values()];
+  return { d: Math.hypot(p[0] - q[0], p[1] - q[1]) || 1, cx: (p[0] + q[0]) / 2, cy: (p[1] + q[1]) / 2 };
+};
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, pos(e));
+  if (pointers.size === 2) { dragging = false; goalDrag = null; pinch = pinchState(); dirty(); return; }
+  if (pointers.size > 2) return;
+  dragging = true; last = pos(e);
+  if (goalMode) { goalDrag = { x0: last[0], y0: last[1], x1: last[0], y1: last[1] }; dirty(); }
 });
-mapWrap.addEventListener('pointercancel', () => { panState = null; activeGoal = null; needsDraw = true; });
-mapWrap.addEventListener('wheel', (evt) => {
-    evt.preventDefault();
-    const [sx, sy] = evtPos(evt), { W, H } = mapSize();
-    const w = s2w(sx, sy);
-    view.s = Math.max(1, Math.min(500, view.s * (evt.deltaY < 0 ? 1.12 : 1 / 1.12)));
-    view.vy = w.y + (sx - W / 2) / view.s;
-    view.vx = w.x + (sy - H / 2) / view.s;
-    needsDraw = true;
+canvas.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  const p = pos(e);
+  pointers.set(e.pointerId, p);
+  if (pinch && pointers.size === 2) {                 // two fingers: pinch zoom + pan
+    const n = pinchState(), k = n.d / pinch.d;
+    view.x = n.cx - (pinch.cx - view.x) * k;
+    view.y = n.cy - (pinch.cy - view.y) * k;
+    view.s *= k; pinch = n; dirty(); return;
+  }
+  if (!dragging) return;
+  if (goalMode && goalDrag) { goalDrag.x1 = p[0]; goalDrag.y1 = p[1]; dirty(); return; }
+  view.x += p[0] - last[0]; view.y += p[1] - last[1];
+  last = p; dirty();
+});
+const endPointer = e => {
+  pointers.delete(e.pointerId);
+  pinch = null;
+  if (!dragging) return;
+  dragging = false;
+  const g = goalDrag; goalDrag = null;
+  if (g && goalMode && e.type === 'pointerup') sendGoal(g);
+  dirty();
+};
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [px, py] = pos(e);
+  const k = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  view.x = px - (px - view.x) * k; view.y = py - (py - view.y) * k;
+  view.s *= k; dirty();
 }, { passive: false });
-new ResizeObserver(() => { needsDraw = true; }).observe(mapWrap);
-
-// =====================================================================
-//  Animation frame & status panel
-// =====================================================================
-let lastStatus = 0;
-function frame(ts) {
-    if (poseDirty) refreshRobotPose();
-    if (mapImageDirty && latestMap) {
-        rebuildMapImage(); mapImageDirty = false;
-        if (!viewFitted) fitMapView();
-        needsDraw = true;
-    }
-    if (localCostmapDirty && latestLocalCostmap) { rebuildLocalCostmapImage(); localCostmapDirty = false; needsDraw = true; }
-    if (globalCostmapDirty && latestGlobalCostmap) { rebuildGlobalCostmapImage(); globalCostmapDirty = false; needsDraw = true; }
-    if (navStatus === 'Planning' && missionGoal && (!latestPlan || latestPlan.length === 0)) needsDraw = true;
-    if (nav2LastError && (Date.now() - nav2LastError.ts) < NAV2_ERROR_BUBBLE_MS) needsDraw = true;
-    if (follow || needsDraw) { drawMap(); needsDraw = false; }
-    if (ts - lastStatus > 200) { lastStatus = ts; updateStatus(); }
-    requestAnimationFrame(frame);
-}
-
-function calcDistanceRemaining() {
-    if (!latestPlan || latestPlan.length < 2) return null;
-    let start = 0, lead = 0;
-    if (robot) {
-        let best = Infinity;
-        for (let i = 0; i < latestPlan.length; i++) {
-            const d = Math.hypot(latestPlan[i].x - robot.x, latestPlan[i].y - robot.y);
-            if (d < best) { best = d; start = i; }
-        }
-        lead = best;
-    }
-    let dist = lead;
-    for (let i = start; i < latestPlan.length - 1; i++) {
-        dist += Math.hypot(latestPlan[i + 1].x - latestPlan[i].x, latestPlan[i + 1].y - latestPlan[i].y);
-    }
-    return dist;
-}
-
-let planBadgeEl = null;
-
-function updateStatus() {
-    const now = performance.now();
-    if (cmdVelAt && now - CFG.cmdVelStaleMs > cmdVelAt && (currentCmdVel.linear || currentCmdVel.angular)) {
-        currentCmdVel = { linear: 0, angular: 0 }; needsDraw = true;
-    }
-
-    document.getElementById('stat-speed').textContent = (odom ? odom.speed : 0).toFixed(2);
-
-    distanceRemaining = calcDistanceRemaining();
-    document.getElementById('stat-distance').textContent =
-        (distanceRemaining !== null && (navStatus === 'Navigating' || navStatus === 'Planning')) ? distanceRemaining.toFixed(2) : '—';
-
-    if (navStatus === 'Navigating' && !nav2StatusFresh()) {
-        let reached = false;
-        if (robot && missionGoal) reached = Math.hypot(robot.x - missionGoal.x, robot.y - missionGoal.y) < CFG.reachTolM;
-        else if (distanceRemaining !== null) reached = distanceRemaining < 0.25;
-        if (reached) {
-            navStatus = 'Reached';
-            missionGoal = null;
-            latestPlan = [];
-            ignorePlansUntil = Date.now() + 1500;
-            clearNavLoading();
-            needsDraw = true;
-            notify('INFO', 'Navigation destination reached.');
-        }
-    }
-
-    const statusEl = document.getElementById('stat-nav-status');
-    statusEl.textContent = navStatus;
-    const col = { Reached: 'var(--success)', Aborted: 'var(--danger)', Failed: 'var(--danger)', Recovering: 'var(--warning)', Navigating: 'var(--primary)', Planning: 'var(--warning)' }[navStatus];
-    statusEl.style.color = col || 'var(--muted)';
-    if (planBadgeEl) planBadgeEl.classList.toggle('show', navStatus === 'Planning');
-
-    if (robot) {
-        let deg = robot.yaw * 180 / Math.PI;
-        deg = ((deg + 180) % 360 + 360) % 360 - 180;
-        document.getElementById('stat-heading').textContent = deg.toFixed(1);
-        document.getElementById('hdg-arrow').style.transform = 'rotate(' + (-deg) + 'deg)';
-        document.getElementById('stat-location').innerHTML =
-            'X ' + robot.x.toFixed(2) + ' &nbsp; Y ' + robot.y.toFixed(2);
-    }
-
-    const empty = document.getElementById('map-empty');
-    if (empty && !latestMap) {
-        empty.textContent = !rosConnected ? 'Map Data Unavailable (ROS bridge offline)'
-            : (Date.now() - rosConnectedAt > 8000 ? 'Waiting for ' + TOPICS.map + '…' : 'Waiting for map…');
-    }
-}
-
-// =====================================================================
-//  Navigation panel helpers
-// =====================================================================
-function setClickMode(mode) {
-    clickMode = mode;
-    document.getElementById('single-actions').style.display = mode === 'single' ? 'flex' : 'none';
-    document.getElementById('waypoint-actions').style.display = mode === 'waypoint' ? 'flex' : 'none';
-    document.getElementById('waypoints-container').style.display = mode === 'waypoint' ? 'block' : 'none';
-    document.querySelectorAll('input[name="click_mode"]').forEach(i => i.checked = (i.value === mode));
-    needsDraw = true;
-}
-function updateUIInputs(x, y, yaw) {
-    document.getElementById('target-x').value = x.toFixed(2);
-    document.getElementById('target-y').value = y.toFixed(2);
-    document.getElementById('target-yaw').value = yaw.toFixed(2);
-    document.getElementById('lbl-x').textContent = x.toFixed(2);
-    document.getElementById('lbl-y').textContent = y.toFixed(2);
-    document.getElementById('lbl-yaw').textContent = yaw.toFixed(2);
-}
-function updateSingleFromInputs() {
-    const x = parseFloat(document.getElementById('target-x').value) || 0;
-    const y = parseFloat(document.getElementById('target-y').value) || 0;
-    const yaw = parseFloat(document.getElementById('target-yaw').value) || 0;
-    document.getElementById('lbl-x').textContent = x.toFixed(2);
-    document.getElementById('lbl-y').textContent = y.toFixed(2);
-    document.getElementById('lbl-yaw').textContent = yaw.toFixed(2);
-    singleTarget = { x, y, yaw }; needsDraw = true;
-}
-function updateWaypointsUI() {
-    const container = document.getElementById('waypoints-container');
-    container.innerHTML = waypointsData.length === 0 ? '<em>No waypoints added.</em>' : '';
-    waypointsData.forEach((wp, i) => {
-        const div = document.createElement('div');
-        div.innerHTML = '<strong>WP ' + (i + 1) + ':</strong> X:' + wp.x.toFixed(2) + ' Y:' + wp.y.toFixed(2) + ' Yaw:' + wp.yaw.toFixed(0) + '&deg;';
-        container.appendChild(div);
-    });
-}
-function clearMarkers() {
-    closePoseActionPopup();
-    singleTarget = null; waypointsData = []; activeGoal = null;
-    if (navStatus !== 'Planning' && navStatus !== 'Navigating') { latestPlan = []; navStatus = 'Idle'; }
-    updateWaypointsUI(); needsDraw = true;
-}
-
-// =====================================================================
-//  Button helpers
-// =====================================================================
-async function withBusy(btn, fn) {
-    if (btn) { if (btn.classList.contains('loading')) return; btn.classList.add('loading'); btn.disabled = true; }
-    try { return await fn(); }
-    finally { if (btn) { btn.classList.remove('loading'); btn.disabled = false; } }
-}
-function run(btn, fn) { return withBusy(btn, fn); }
-function runNavButton(btn, fn) { return fn(); }
-
-window.run = run;
-window.runNavButton = runNavButton;
-
-// =====================================================================
-//  Navigation commands (REST)
-// =====================================================================
-function readTarget() {
-    const x = parseFloat(document.getElementById('target-x').value);
-    const y = parseFloat(document.getElementById('target-y').value);
-    const yaw_deg = parseFloat(document.getElementById('target-yaw').value) || 0;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x, y, yaw_deg };
-}
-
-async function sendGoalPose() {
-    const t = readTarget();
-    if (!t) { notify('WARNING', 'Enter valid X and Y target values.'); return; }
-    const btn = document.getElementById('nav-pose-btn');
-    setNavLoading(btn);
-    startNavWatchdog();
-    navStatus = 'Planning';
-    missionGoal = { x: t.x, y: t.y };
-    latestPlan = [];
-    nav2GoalStatusCode = null; nav2ActiveNode = null; nav2Stage = null; nav2LastError = null;
-    try {
-        await postJSON('/navigate_to_pose', { x: t.x, y: t.y, yaw_deg: t.yaw_deg });
-        notify('INFO', 'Goal sent to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
-    } catch (e) {
-        clearNavLoading();
-        navStatus = 'Idle'; missionGoal = null;
-        notify('ERROR', 'Navigation failed: ' + e.message);
-    }
-}
-
-async function sendInitialPose() {
-    const t = readTarget();
-    if (!t) { notify('WARNING', 'Enter valid X and Y values.'); return; }
-    try {
-        await postJSON('/set_initial_pose', { x: t.x, y: t.y, yaw_deg: t.yaw_deg });
-        notify('INFO', 'Initial pose set to (' + t.x.toFixed(2) + ', ' + t.y.toFixed(2) + ').');
-    } catch (e) { notify('ERROR', 'Set initial pose failed: ' + e.message); }
-}
-
-async function sendWaypoints() {
-    if (waypointsData.length === 0) { notify('WARNING', 'No waypoints added. Click the map to add some.'); return; }
-    const btn = document.getElementById('follow-wp-btn');
-    setNavLoading(btn);
-    startNavWatchdog();
-    navStatus = 'Planning';
-    const last = waypointsData[waypointsData.length - 1];
-    missionGoal = { x: last.x, y: last.y };
-    latestPlan = [];
-    nav2GoalStatusCode = null; nav2ActiveNode = null; nav2Stage = null; nav2LastError = null;
-    const waypoints = waypointsData.map(wp => ({ x: wp.x, y: wp.y, yaw_deg: wp.yaw }));
-    try {
-        await postJSON('/follow_waypoints', { waypoints });
-        notify('INFO', 'Following ' + waypoints.length + ' waypoint(s).');
-    } catch (e) {
-        clearNavLoading();
-        navStatus = 'Idle'; missionGoal = null;
-        notify('ERROR', 'Waypoint mission failed: ' + e.message);
-    }
-}
-
-async function sendAbort() {
-    clearNavLoading();
-    navStatus = 'Aborted';
-    missionGoal = null;
-    latestPlan = [];
-    ignorePlansUntil = Date.now() + 1500;
-    needsDraw = true;
-    try {
-        await postJSON('/abort');
-        notify('WARNING', 'Mission abort requested.');
-    } catch (e) { notify('ERROR', 'Abort request failed: ' + e.message); }
-}
-
-// =====================================================================
-//  Emergency controls (top-right of the SLAM map panel)
-// =====================================================================
-
-// Emergency ABORT — stops Nav2 immediately, cancels goals, zeroes cmd_vel.
-// Guards against double-clicks and cleans up all UI state so the user
-// can immediately issue a new goal afterwards.
-async function emergencyAbort() {
-    const btn = document.getElementById('emergency-abort-btn');
-    const homeBtn = document.getElementById('emergency-home-btn');
-
-    if (!window.confirm('ABORT the current mission?\n\nThis immediately cancels Nav2 and stops the rover.')) {
-        return;
-    }
-
-    if (btn) btn.disabled = true;
-    if (homeBtn) homeBtn.disabled = true;
-
-    // Immediately clear client-side navigation state (don't wait for the API).
-    clearNavLoading();
-    navStatus = 'Aborted';
-    missionGoal = null;
-    latestPlan = [];
-    ignorePlansUntil = Date.now() + 1500;
-    nav2GoalStatusCode = null;
-    nav2ActiveNode = null;
-    nav2Stage = 'Aborted';
-    needsDraw = true;
-
-    // Also stop the joystick if it's active, so nothing keeps publishing.
-    if (joyEnabled) {
-        try { window.toggleJoyEnable(); } catch (_) {}
-    }
-    // Publish a zero Twist directly to /cmd_vel_joy as well.
-    try { publishJoyRaw(0, 0); } catch (_) {}
-
-    try {
-        await postJSON('/abort');
-        notify('WARNING', 'EMERGENCY ABORT — mission cancelled.');
-    } catch (e) {
-        notify('ERROR', 'Abort request failed: ' + e.message);
-    } finally {
-        setTimeout(() => {
-            if (btn) btn.disabled = false;
-            if (homeBtn) homeBtn.disabled = false;
-        }, 800);
-    }
-}
-
-// Emergency RETURN TO HOME — cancels any active mission, then sends
-// a NavigateToPose goal back to the map origin (0, 0, yaw 0).
-async function emergencyReturnHome() {
-    const btn = document.getElementById('emergency-home-btn');
-    const abortBtn = document.getElementById('emergency-abort-btn');
-
-    if (!window.confirm('RETURN TO HOME?\n\nThe rover will cancel its current mission and drive back to map origin (0, 0, 0°).')) {
-        return;
-    }
-
-    if (btn) btn.disabled = true;
-    if (abortBtn) abortBtn.disabled = true;
-
-    try {
-        // 1) Cancel whatever Nav2 is currently doing.
-        clearNavLoading();
-        navStatus = 'Aborted';
-        missionGoal = null;
-        latestPlan = [];
-        ignorePlansUntil = Date.now() + 1500;
-        nav2GoalStatusCode = null;
-        nav2ActiveNode = null;
-        nav2Stage = null;
-        needsDraw = true;
-
-        try { await postJSON('/abort'); } catch (_) { /* keep going — we still want to send the home goal */ }
-
-        // 2) Give Nav2 a moment to settle after cancellation, then send the home goal.
-        await new Promise((r) => setTimeout(r, 700));
-
-        // 3) Send the goal at map origin with yaw = 0.
-        setNavLoading(document.getElementById('nav-pose-btn'));
-        startNavWatchdog();
-        navStatus = 'Planning';
-        missionGoal = { x: 0, y: 0 };
-        nav2GoalStatusCode = null;
-        nav2ActiveNode = null;
-        nav2Stage = null;
-        nav2LastError = null;
-
-        await postJSON('/navigate_to_pose', { x: 0, y: 0, yaw_deg: 0 });
-
-        // 4) Reflect the target in the UI so it's visible on the map.
-        updateUIInputs(0, 0, 0);
-        singleTarget = { x: 0, y: 0, yaw: 0 };
-        needsDraw = true;
-
-        notify('INFO', 'Returning to home (map origin 0, 0).');
-    } catch (e) {
-        clearNavLoading();
-        navStatus = 'Idle';
-        missionGoal = null;
-        notify('ERROR', 'Return to home failed: ' + e.message);
-    } finally {
-        setTimeout(() => {
-            if (btn) btn.disabled = false;
-            if (abortBtn) abortBtn.disabled = false;
-        }, 800);
-    }
-}
-
-window.emergencyAbort = emergencyAbort;
-window.emergencyReturnHome = emergencyReturnHome;
-// =====================================================================
-//  Clear SLAM — drop the map and restart from the rover's current pose
-// =====================================================================
-
-/**
- * Clears the SLAM map and restarts mapping.
- *
- * The rover's current physical location becomes the new map origin
- * (0, 0, 0). Any active Nav2 mission is cancelled first, and all
- * local map/path/pose state is reset so the UI shows a fresh slate.
- */
-async function resetSlam() {
-    const btn = document.getElementById('slam-reset-btn');
-    const abortBtn = document.getElementById('emergency-abort-btn');
-    const homeBtn = document.getElementById('emergency-home-btn');
-
-    if (!window.confirm(
-        'CLEAR SLAM MAP?\n\n' +
-        'This will:\n' +
-        '  • cancel any active Nav2 mission\n' +
-        '  • erase the current SLAM map\n' +
-        '  • restart mapping with the rover\'s current position as the new origin (0, 0, 0)\n\n' +
-        'The rover will NOT move. Continue?'
-    )) {
-        return;
-    }
-
-    if (btn) btn.disabled = true;
-    if (abortBtn) abortBtn.disabled = true;
-    if (homeBtn) homeBtn.disabled = true;
-
-    // Stop the joystick and publish zero velocity so nothing is moving.
-    if (joyEnabled) {
-        try { window.toggleJoyEnable(); } catch (_) {}
-    }
-    try { publishJoyRaw(0, 0); } catch (_) {}
-
-    // ---- Reset client-side UI state up-front -------------------------
-    // This makes the UI feel immediate, then we reconcile with the
-    // server response below.
-    const previousRobot = robot ? { ...robot } : null;
-
-    latestMap = null;
-    latestPlan = [];
-    latestScanPoints = [];
-    latestLocalCostmap = null;
-    latestGlobalCostmap = null;
-    localCostmapDirty = true;
-    globalCostmapDirty = true;
-    mapImageDirty = true;
-    viewFitted = false;
-
-    singleTarget = null;
-    activeGoal = null;
-    waypointsData = [];
-    missionGoal = null;
-    distanceRemaining = null;
-
-    navStatus = 'Idle';
-    nav2GoalStatusCode = null;
-    nav2ActiveNode = null;
-    nav2Stage = null;
-    nav2LastError = null;
-
-    updateWaypointsUI();
-    closePoseActionPopup();
-    clearNavLoading();
-
-    // Reset the robot marker to the origin, since the new map's
-    // origin IS the rover's current physical location.
-    if (previousRobot) {
-        robot = { x: 0, y: 0, yaw: 0 };
-    }
-    odomPose = null;
-    poseDirty = true;
-
-    // Reset the view so the empty map is centered on the origin.
-    view.vx = 0;
-    view.vy = 0;
-    view.s = 30;
-    follow = true;
-    const followButton = document.getElementById('follow-btn');
-    if (followButton) followButton.classList.add('on');
-
-    needsDraw = true;
-
-    const mapEmpty = document.getElementById('map-empty');
-    if (mapEmpty) {
-        mapEmpty.textContent = 'Waiting for the new SLAM map…';
-        mapEmpty.style.display = 'flex';
-    }
-    const mapMeta = document.getElementById('map-meta');
-    if (mapMeta) mapMeta.textContent = '';
-
-    // ---- Call the backend -------------------------------------------
-    try {
-        const data = await postJSON('/slam/reset');
-        if (data && data.ok === false) {
-            notify('WARNING', 'SLAM reset partially applied: ' + (data.detail || 'unknown reason'));
-        } else {
-            notify('INFO', 'SLAM map cleared. Mapping restarted from the rover\'s current position.');
-        }
-
-        // Anchor the UI at the new origin.
-        updateUIInputs(0, 0, 0);
-    } catch (e) {
-        notify('ERROR', 'SLAM reset failed: ' + e.message);
-        // Restore the previous pose so the UI is not stuck at a fake origin.
-        if (previousRobot) {
-            robot = previousRobot;
-            needsDraw = true;
-        }
-    } finally {
-        setTimeout(() => {
-            if (btn) btn.disabled = false;
-            if (abortBtn) abortBtn.disabled = false;
-            if (homeBtn) homeBtn.disabled = false;
-        }, 800);
-    }
-}
-
-window.resetSlam = resetSlam;
-// =====================================================================
-//  Save Map (to disk) + Load Map (from upload)
-// =====================================================================
-function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-}
-
-// --- Save Map dialog --------------------------------------------------
-
-let saveMapDialogEl = null;
-let loadMapDialogEl = null;
-
-function openSaveMapDialog() {
-    saveMapDialogEl = document.getElementById('save-map-dialog');
-    const nameInput = document.getElementById('save-map-name');
-    const status = document.getElementById('save-map-status');
-    if (!saveMapDialogEl) return;
-
-    const current = (document.getElementById('map-name-input') || {}).value || 'small_warehouse';
-    nameInput.value = current;
-    status.textContent = '';
-    saveMapDialogEl.hidden = false;
-    setTimeout(() => nameInput.focus(), 0);
-}
-
-function closeSaveMapDialog() {
-    if (saveMapDialogEl) saveMapDialogEl.hidden = true;
-}
-
-async function checkMapExists(name) {
-    try {
-        const res = await fetch(REST_API_BASE + '/map/exists?name=' + encodeURIComponent(name));
-        if (!res.ok) return false;
-        const data = await res.json();
-        return !!data.exists;
-    } catch (_) {
-        return false;
-    }
-}
-
-// Build a PGM (P5) binary blob from the latest live map.
-function buildPGMBlobFromLiveMap(m) {
-    const header = 'P5\n# CREATOR: Milusions WareGV Suite\n' + m.w + ' ' + m.h + '\n255\n';
-    const headerBytes = new TextEncoder().encode(header);
-    const gray = new Uint8Array(m.w * m.h);
-    for (let j = 0; j < m.h; j++) {
-        for (let i = 0; i < m.w; i++) {
-            const v = m.data[j * m.w + i];
-            let g = 205;
-            if (v >= 0) g = v >= 65 ? 0 : (v <= 25 ? 254 : 205);
-            gray[(m.h - 1 - j) * m.w + i] = g;
-        }
-    }
-    const out = new Uint8Array(headerBytes.length + gray.length);
-    out.set(headerBytes, 0);
-    out.set(gray, headerBytes.length);
-    return new Blob([out], { type: 'image/x-portable-graymap' });
-}
-
-async function confirmSaveMap() {
-    const nameInput = document.getElementById('save-map-name');
-    const status = document.getElementById('save-map-status');
-    const confirmBtn = document.getElementById('save-map-confirm');
-    const rawName = (nameInput.value || '').trim();
-
-    if (!rawName) {
-        status.textContent = 'Please enter a map name.';
-        return;
-    }
-
-    const safeName = rawName.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^[._]+|[._]+$/g, '');
-    if (!safeName) {
-        status.textContent = 'That name contains no valid characters.';
-        return;
-    }
-
-    status.textContent = 'Checking if the map already exists…';
-    const exists = await checkMapExists(safeName);
-    if (exists) {
-        const proceed = window.confirm(
-            'A map named "' + safeName + '" already exists in the maps folder.\n\n' +
-            'Overwrite it?'
-        );
-        if (!proceed) {
-            status.textContent = 'Save cancelled — choose a different name.';
-            return;
-        }
-    }
-
-    // Grab the current live map as a PGM.
-    if (!latestMap) {
-        status.textContent = 'No live map data to save yet.';
-        return;
-    }
-    const pgmBlob = buildPGMBlobFromLiveMap(latestMap);
-
-    // Build a matching YAML so the download is a complete, Nav2-ready map.
-    const yamlBlob = buildYamlBlobForLiveMap(latestMap, safeName);
-
-    const form = new FormData();
-    form.append('name', safeName);
-    form.append('overwrite', exists ? 'true' : 'false');
-    form.append('pgm', pgmBlob, safeName + '.pgm');
-
-    confirmBtn.disabled = true;
-    confirmBtn.classList.add('loading');
-    status.textContent = 'Saving map on the rover…';
-
-    let savedOnRover = false;
-
-    // 1) Save on the rover's disk (via the REST endpoint).
-    try {
-        const res = await fetch(REST_API_BASE + '/map/save_to_disk', {
-            method: 'POST',
-            body: form
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            throw new Error(data.detail || ('HTTP ' + res.status));
-        }
-        savedOnRover = true;
-        status.textContent = 'Saved on rover at ' + (data.directory || safeName) + '.';
-        notify('INFO', 'Map "' + safeName + '" saved on the rover.');
-        await loadMapNames();
-    } catch (e) {
-        status.textContent = 'Rover save failed: ' + e.message;
-        notify('ERROR', 'Save map failed on rover: ' + e.message);
-    }
-
-    // 2) Also trigger a local download of the .pgm + .yaml (as a .zip),
-    //    regardless of whether the rover-side save succeeded.
-    try {
-        const zipBlob = await buildMapZipBlob(safeName, pgmBlob, yamlBlob);
-        downloadBlob(zipBlob, safeName + '.zip');
-        status.textContent = (savedOnRover ? 'Saved on rover. ' : '') +
-            'Downloaded "' + safeName + '.zip" to your computer.';
-        if (savedOnRover) {
-            notify('INFO', 'Map "' + safeName + '" also downloaded to your computer.');
-        } else {
-            notify('WARNING', 'Map downloaded locally, but the rover save failed.');
-        }
-    } catch (e) {
-        status.textContent = (savedOnRover ? 'Saved on rover. ' : '') +
-            'Local download failed: ' + e.message;
-        notify('ERROR', 'Local map download failed: ' + e.message);
-    }
-
-    confirmBtn.disabled = false;
-    confirmBtn.classList.remove('loading');
-
-    // Close the dialog once we're done.
-    setTimeout(closeSaveMapDialog, 1200);
-}
-
-// Build a matching YAML for the live map. Mirrors what the backend writes
-// when no YAML is supplied, so the local download is fully self-contained.
-function buildYamlBlobForLiveMap(m, name) {
-    const yamlText =
-        'image: ' + name + '.pgm\n' +
-        'resolution: ' + m.res.toFixed(6) + '\n' +
-        'origin: [' + m.ox.toFixed(6) + ', ' + m.oy.toFixed(6) + ', 0.000000]\n' +
-        'negate: 0\n' +
-        'occupied_thresh: 0.65\n' +
-        'free_thresh: 0.196\n';
-    return new Blob([yamlText], { type: 'text/yaml' });
-}
-
-// Minimal in-browser ZIP writer (STORE only, no compression).
-// Enough for shipping a couple of small files; avoids pulling in a library.
-async function buildMapZipBlob(name, pgmBlob, yamlBlob) {
-    const enc = new TextEncoder();
-    const pgmBytes = new Uint8Array(await pgmBlob.arrayBuffer());
-    const yamlBytes = new Uint8Array(await yamlBlob.arrayBuffer());
-
-    const files = [
-        { name: name + '.pgm', data: pgmBytes },
-        { name: name + '.yaml', data: yamlBytes }
-    ];
-
-    const chunks = [];
-    const central = [];
-    let offset = 0;
-
-    // CRC32 helper (standard polynomial).
-    const crcTable = (() => {
-        const t = new Uint32Array(256);
-        for (let n = 0; n < 256; n++) {
-            let c = n;
-            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-            t[n] = c >>> 0;
-        }
-        return t;
-    })();
-    const crc32 = (bytes) => {
-        let c = 0xFFFFFFFF;
-        for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
-        return (c ^ 0xFFFFFFFF) >>> 0;
-    };
-
-    // DOS date/time.
-    const now = new Date();
-    const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
-    const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
-
-    for (const f of files) {
-        const nameBytes = enc.encode(f.name);
-        const crc = crc32(f.data);
-        const size = f.data.length;
-
-        // Local file header (30 bytes + name).
-        const lh = new Uint8Array(30 + nameBytes.length);
-        const lv = new DataView(lh.buffer);
-        lv.setUint32(0, 0x04034b50, true);   // signature
-        lv.setUint16(4, 20, true);           // version needed
-        lv.setUint16(6, 0, true);            // flags
-        lv.setUint16(8, 0, true);            // method (STORE)
-        lv.setUint16(10, dosTime, true);
-        lv.setUint16(12, dosDate, true);
-        lv.setUint32(14, crc, true);
-        lv.setUint32(18, size, true);
-        lv.setUint32(22, size, true);
-        lv.setUint16(26, nameBytes.length, true);
-        lv.setUint16(28, 0, true);           // extra length
-        lh.set(nameBytes, 30);
-
-        chunks.push(lh, f.data);
-
-        // Central directory record.
-        const ch = new Uint8Array(46 + nameBytes.length);
-        const cv = new DataView(ch.buffer);
-        cv.setUint32(0, 0x02014b50, true);   // signature
-        cv.setUint16(4, 20, true);           // version made by
-        cv.setUint16(6, 20, true);           // version needed
-        cv.setUint16(8, 0, true);
-        cv.setUint16(10, 0, true);           // STORE
-        cv.setUint16(12, dosTime, true);
-        cv.setUint16(14, dosDate, true);
-        cv.setUint32(16, crc, true);
-        cv.setUint32(20, size, true);
-        cv.setUint32(24, size, true);
-        cv.setUint16(28, nameBytes.length, true);
-        cv.setUint16(30, 0, true);           // extra
-        cv.setUint16(32, 0, true);           // comment
-        cv.setUint16(34, 0, true);           // disk start
-        cv.setUint16(36, 0, true);           // internal attrs
-        cv.setUint32(38, 0, true);           // external attrs
-        cv.setUint32(42, offset, true);      // local header offset
-        ch.set(nameBytes, 46);
-        central.push(ch);
-
-        offset += lh.length + size;
-    }
-
-    // End of central directory.
-    const cdSize = central.reduce((s, c) => s + c.length, 0);
-    const eocd = new Uint8Array(22);
-    const ev = new DataView(eocd.buffer);
-    ev.setUint32(0, 0x06054b50, true);
-    ev.setUint16(8, files.length, true);
-    ev.setUint16(10, files.length, true);
-    ev.setUint32(12, cdSize, true);
-    ev.setUint32(16, offset, true);
-    ev.setUint16(20, 0, true);
-
-    return new Blob([...chunks, ...central, eocd], { type: 'application/zip' });
-}
-
-// --- Load Map dialog --------------------------------------------------
-
-function openLoadMapDialog() {
-    loadMapDialogEl = document.getElementById('load-map-dialog');
-    if (!loadMapDialogEl) return;
-    document.getElementById('load-map-name').value = '';
-    document.getElementById('load-map-pgm').value = '';
-    document.getElementById('load-map-yaml').value = '';
-    document.getElementById('load-map-overwrite').checked = false;
-    document.getElementById('load-map-status').textContent = '';
-    loadMapDialogEl.hidden = false;
-}
-
-function closeLoadMapDialog() {
-    if (loadMapDialogEl) loadMapDialogEl.hidden = true;
-}
-
-async function confirmLoadMap() {
-    const nameInput = document.getElementById('load-map-name');
-    const pgmInput = document.getElementById('load-map-pgm');
-    const yamlInput = document.getElementById('load-map-yaml');
-    const overwriteInput = document.getElementById('load-map-overwrite');
-    const status = document.getElementById('load-map-status');
-    const confirmBtn = document.getElementById('load-map-confirm');
-
-    const rawName = (nameInput.value || '').trim();
-    if (!rawName) { status.textContent = 'Please enter a map name.'; return; }
-    const safeName = rawName.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^[._]+|[._]+$/g, '');
-    if (!safeName) { status.textContent = 'That name contains no valid characters.'; return; }
-
-    if (!pgmInput.files || !pgmInput.files.length) {
-        status.textContent = 'Please choose a .pgm (or image) file.';
-        return;
-    }
-
-    const exists = await checkMapExists(safeName);
-    if (exists && !overwriteInput.checked) {
-        status.textContent = 'That map already exists. Tick "Overwrite" to replace it.';
-        return;
-    }
-
-    const form = new FormData();
-    form.append('name', safeName);
-    form.append('overwrite', overwriteInput.checked ? 'true' : 'false');
-    form.append('pgm', pgmInput.files[0], safeName + '.pgm');
-    if (yamlInput.files && yamlInput.files.length) {
-        form.append('yaml', yamlInput.files[0], safeName + '.yaml');
-    }
-
-    confirmBtn.disabled = true;
-    confirmBtn.classList.add('loading');
-    status.textContent = 'Uploading…';
-
-    try {
-        const res = await fetch(REST_API_BASE + '/map/load', {
-            method: 'POST',
-            body: form
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
-        status.textContent = 'Stored at ' + (data.directory || safeName) + '.';
-        notify('INFO', 'Map "' + safeName + '" uploaded to the rover.');
-        await loadMapNames();
-        setTimeout(closeLoadMapDialog, 900);
-    } catch (e) {
-        status.textContent = 'Upload failed: ' + e.message;
-        notify('ERROR', 'Load map failed: ' + e.message);
-    } finally {
-        confirmBtn.disabled = false;
-        confirmBtn.classList.remove('loading');
-    }
-}
-
-window.openSaveMapDialog = openSaveMapDialog;
-window.closeSaveMapDialog = closeSaveMapDialog;
-window.confirmSaveMap = confirmSaveMap;
-window.openLoadMapDialog = openLoadMapDialog;
-window.closeLoadMapDialog = closeLoadMapDialog;
-window.confirmLoadMap = confirmLoadMap;
-
-// Backwards-compatible save.
-async function saveCurrentMap() {
-    openSaveMapDialog();
-}
-
-// =====================================================================
-//  Map name list
-// =====================================================================
-function extractMapNames(data) {
-    const values = Array.isArray(data) ? data
-        : data && (data.maps || data.map_names || data.names || data.items) || [];
-    if (!Array.isArray(values)) return [];
-    return values.map((item) => {
-        if (typeof item === 'string') return item;
-        if (item && typeof item === 'object') return item.name || item.map_name || item.filename || '';
-        return '';
-    }).map((name) => String(name).trim()).filter(Boolean)
-        .map((name) => name.replace(/\.ya?ml$/i, '').replace(/\.zip$/i, ''))
-        .filter((name, index, list) => list.indexOf(name) === index);
-}
-
-async function loadMapNames() {
-    const select = document.getElementById('map-name-input');
-    if (!select) return;
-    const endpoints = ['/maps', '/map/list', '/maps/list'];
-    for (const endpoint of endpoints) {
-        try {
-            const response = await fetch(REST_API_BASE + endpoint, { cache: 'no-store' });
-            if (!response.ok) continue;
-            const names = extractMapNames(await response.json());
-            if (!names.length) continue;
-            const current = select.value || 'small_warehouse';
-            select.replaceChildren(...names.map((name) => {
-                const option = document.createElement('option');
-                option.value = name;
-                option.textContent = name;
-                return option;
-            }));
-            select.value = names.includes(current) ? current : names[0];
-            return;
-        } catch (_) {}
-    }
-}
-
-// =====================================================================
-//  System mode
-// =====================================================================
-let currentMode = null, pending = null, modeSelectTouched = false;
-const modeLoaders = [];
-
-function initMapPanelExtras() {
-    const wrap = document.getElementById('map-wrapper');
-    if (wrap) {
-        planBadgeEl = document.createElement('div');
-        planBadgeEl.className = 'map-plan-badge';
-        planBadgeEl.innerHTML = '<span class="plan-spinner"></span><span>Waiting for Nav2 path…</span>';
-        wrap.appendChild(planBadgeEl);
-    }
-    ['.p-map', '.ctrl-panel'].forEach(sel => {
-        const host = document.querySelector(sel);
-        if (!host) return;
-        const l = document.createElement('div');
-        l.className = 'mode-loader';
-        l.innerHTML = '<div class="mode-loader-card"><div class="ml-spinner"></div>' +
-            '<div class="ml-title">Switching mode</div>' +
-            '<div class="ml-sub">Deploying<span class="ml-dots"><i>.</i><i>.</i><i>.</i></span></div></div>';
-        host.appendChild(l);
-        modeLoaders.push(l);
-    });
-}
-function showModeLoaders(on) { modeLoaders.forEach(l => l.classList.toggle('show', !!on)); }
-
-async function fetchMode() {
-    try {
-        const res = await fetch(REST_API_BASE + '/system/mode');
-        if (res.ok) {
-            const data = await res.json();
-            return data.mode || data.current_mode || null;
-        }
-    } catch (e) {}
-    return null;
-}
-
-function renderMode() {
-    const chip = document.getElementById('mode-chip'), txt = document.getElementById('stat-mode');
-    const btn = document.getElementById('deploy-btn');
-    chip.classList.remove('known', 'pending');
-    if (pending) {
-        chip.classList.add('pending');
-        txt.textContent = 'Switching to ' + modeLabel(pending.target) + '…';
-    } else if (currentMode) {
-        chip.classList.add('known');
-        txt.textContent = modeLabel(currentMode);
-    } else {
-        txt.textContent = 'Unknown';
-    }
-    btn.disabled = !!pending;
-    btn.classList.toggle('loading', !!pending);
-}
-
-function setCurrentMode(m) {
-    currentMode = m;
-    if (m && !modeSelectTouched && !pending) {
-        const sel = document.getElementById('sys-mode-select');
-        if (sel && Array.from(sel.options).some(o => o.value === m)) sel.value = m;
-    }
-    renderMode();
-}
-
-async function applySystemMode() {
-    if (pending) return;
-    const mode = document.getElementById('sys-mode-select').value;
-    const mapName = (document.getElementById('map-name-input').value || 'small_warehouse').trim();
-    pending = { target: mode };
-    renderMode(); showModeLoaders(true);
-    try {
-        const data = await postJSON('/system/mode', { mode, map_name: mapName });
-        pending = null;
-        setCurrentMode((data && data.mode) || mode);
-        notify('INFO', 'Switched to ' + modeLabel(mode) + ' (map: ' + mapName + ').');
-    } catch (e) {
-        pending = null; renderMode();
-        notify('ERROR', 'Mode switch failed: ' + e.message);
-    } finally {
-        showModeLoaders(false);
-    }
-}
-
-// =====================================================================
-//  Joystick
-// =====================================================================
-const joyPad = document.getElementById('joy-pad'), joyKnob = document.getElementById('joy-knob');
-const joyMaxVelInput = document.getElementById('joy-max-vel'), joyMaxAngInput = document.getElementById('joy-max-ang');
-const joy = { x: 0, y: 0, active: false, timer: null };
-let joyEnabled = false;
-
-function clamp(val, lo, hi) { return Math.min(hi, Math.max(lo, val)); }
-
-function getJoyMaxVel() {
-    const v = parseFloat(joyMaxVelInput && joyMaxVelInput.value);
-    return clamp(Number.isFinite(v) ? v : 0, 0, 5);
-}
-function getJoyMaxAng() {
-    const v = parseFloat(joyMaxAngInput && joyMaxAngInput.value);
-    return clamp(Number.isFinite(v) ? v : 0, 0, 5);
-}
-
-function publishJoyRaw(turn, fwd) {
-    if (!joyTopic || !rosConnected) return false;
-    const maxVel = getJoyMaxVel(), maxAng = getJoyMaxAng();
-    const linX = clamp(fwd, -1, 1) * maxVel;
-    const angZ = clamp(turn, -1, 1) * maxAng;
-    joyTopic.publish(new ROSLIB.Message({
-        linear: { x: linX, y: 0, z: 0 },
-        angular: { x: 0, y: 0, z: angZ }
-    }));
-    return true;
-}
-function publishJoy() {
-    if (!joyEnabled) return;
-    publishJoyRaw(-joy.x, -joy.y);
-}
-
-window.toggleJoyEnable = function () {
-    if (!joyEnabled && !rosConnected) {
-        notify('WARNING', 'ROS bridge is offline - the joystick cannot send commands yet.');
-    }
-    joyEnabled = !joyEnabled;
-    const btn = document.getElementById('joy-enable-btn');
-    btn.textContent = joyEnabled ? 'Disable' : 'Enable';
-    btn.classList.toggle('btn-primary', joyEnabled);
-    btn.classList.toggle('btn-secondary', !joyEnabled);
-    if (!joyEnabled) {
-        joyEnd();
-        publishJoyRaw(0, 0);
-    }
-    notify('INFO', joyEnabled ? 'Joystick enabled.' : 'Joystick disabled.');
+document.getElementById('btn-fit').onclick = () => {
+  view = { s: 60, x: canvas.width / 2, y: canvas.height / 2 }; dirty();
 };
 
-function joyShow() {
-    joyKnob.style.transform = 'translate(' + (joy.x * joyR()) + 'px,' + (joy.y * joyR()) + 'px)';
-    document.getElementById('joy-x').textContent = (-joy.x).toFixed(2);
-    document.getElementById('joy-y').textContent = (-joy.y).toFixed(2);
+// "Set goal" button toggles goal mode; next click on the map sends a Nav2 goal
+const goalBtn = document.getElementById('btn-goal');
+function setGoalMode(on) {
+  goalMode = on; goalDrag = null;
+  goalBtn.classList.toggle('active', on);
+  canvas.style.cursor = on ? 'crosshair' : 'grab';
+  dirty();
 }
-function joyR() { return joyPad.clientWidth / 2 - 26; }
-function joyMove(evt) {
-    const r = joyPad.getBoundingClientRect(), R = joyR();
-    let dx = evt.clientX - (r.left + r.width / 2), dy = evt.clientY - (r.top + r.height / 2);
-    const mag = Math.hypot(dx, dy);
-    if (mag > R) { dx *= R / mag; dy *= R / mag; }
-    joy.x = dx / R; joy.y = dy / R; joyShow();
-}
-
-joyPad.addEventListener('pointerdown', (e) => {
-    joyPad.setPointerCapture(e.pointerId); joyPad.classList.add('active');
-    joy.active = true; joyMove(e);
-    clearInterval(joy.timer);
-    joy.timer = setInterval(publishJoy, 1000 / CFG.joyRateHz);
-    publishJoy();
+goalBtn.onclick = () => setGoalMode(!goalMode);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { setGoalMode(false); document.querySelectorAll('.maximized').forEach(el => el.classList.remove('maximized')); }
 });
-joyPad.addEventListener('pointermove', (e) => { if (joy.active) joyMove(e); });
-function joyEnd() {
-    if (!joy.active) return;
-    joy.active = false; joyPad.classList.remove('active');
-    clearInterval(joy.timer); joy.timer = null;
-    joy.x = 0; joy.y = 0; joyShow();
-    publishJoy(); setTimeout(publishJoy, 50); setTimeout(publishJoy, 100);
-}
-joyPad.addEventListener('pointerup', joyEnd);
-joyPad.addEventListener('pointercancel', joyEnd);
-joyPad.addEventListener('lostpointercapture', joyEnd);
-window.addEventListener('blur', joyEnd);
-document.addEventListener('visibilitychange', () => { if (document.hidden) joyEnd(); });
 
-// =====================================================================
-//  MAP VIEWER
-// =====================================================================
-const PGM_FREE = 254, PGM_UNKNOWN = 205, PGM_OCC = 0;
-const OCC_THRESH = 65, FREE_THRESH = 25;
-
-const mv = {
-    ready: false, open: false,
-    root: null, canvas: null, ctx: null, body: null,
-    img: null, gray: null, w: 0, h: 0, res: 0.05, origin: null, label: '',
-    s: 1, tx: 0, ty: 0,
-    measure: false, pts: [], hover: null, drag: null
-};
-
-const $mv = (id) => document.getElementById(id);
-
-function mvEnsureInit() {
-    if (mv.ready) return;
-    mv.ready = true;
-    mv.root = $mv('map-viewer');
-    mv.canvas = $mv('mv-canvas');
-    mv.ctx = mv.canvas.getContext('2d');
-    mv.body = $mv('mv-body');
-
-    new ResizeObserver(() => { if (mv.open) mvDraw(); }).observe(mv.body);
-    mv.root.addEventListener('pointerdown', (e) => { if (e.target === mv.root) closeMapViewer(); });
-
-    mv.canvas.addEventListener('contextmenu', e => e.preventDefault());
-    mv.canvas.addEventListener('pointerdown', (e) => {
-        mv.canvas.setPointerCapture(e.pointerId);
-        mv.drag = { sx: e.offsetX, sy: e.offsetY, tx: mv.tx, ty: mv.ty, moved: false };
-    });
-    mv.canvas.addEventListener('pointermove', (e) => {
-        const sx = e.offsetX, sy = e.offsetY;
-        mv.hover = { sx, sy };
-        if (mv.drag) {
-            const dx = sx - mv.drag.sx, dy = sy - mv.drag.sy;
-            if (!mv.drag.moved && Math.hypot(dx, dy) > 3) mv.drag.moved = true;
-            if (mv.drag.moved) { mv.tx = mv.drag.tx + dx; mv.ty = mv.drag.ty + dy; }
-        }
-        mvReadout(); mvDraw();
-    });
-    const up = (e) => {
-        const d = mv.drag; mv.drag = null;
-        if (!d || d.moved || e.type === 'pointercancel') { mvDraw(); return; }
-        if (mv.measure && mv.img) mvAddPoint(e.offsetX, e.offsetY);
-    };
-    mv.canvas.addEventListener('pointerup', up);
-    mv.canvas.addEventListener('pointercancel', up);
-    mv.canvas.addEventListener('pointerleave', () => { mv.hover = null; mvReadout(); mvDraw(); });
-    mv.canvas.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        if (!mv.img) return;
-        mvZoomAt(e.offsetX, e.offsetY, e.deltaY < 0 ? 1.15 : 1 / 1.15);
-    }, { passive: false });
-
-    $mv('mv-file').addEventListener('change', (e) => mvLoadFiles(Array.from(e.target.files || [])));
-    document.addEventListener('keydown', (e) => {
-        if (!mv.open) return;
-        if (e.key === 'Escape') closeMapViewer();
-        if (e.key === 'm' || e.key === 'M') mvToggleMeasure();
-    });
+// press = position, drag = heading, release = send (short drag keeps heading 0)
+function sendGoal(g) {
+  setGoalMode(false);
+  const x = (g.x0 - view.x) / view.s, y = -(g.y0 - view.y) / view.s;
+  const dx = g.x1 - g.x0, dy = g.y1 - g.y0;
+  const deg = Math.hypot(dx, dy) > 12 ? Math.round(Math.atan2(-dy, dx) * 180 / Math.PI) : 0;
+  if (!confirm(`Navigate to x=${x.toFixed(2)}, y=${y.toFixed(2)}, heading ${deg}\u00B0?`)) return;
+  const yaw = deg * Math.PI / 180;
+  topic(T.goal, 'geometry_msgs/msg/PoseStamped').publish({
+    header: { frame_id: 'map' },
+    pose: { position: { x, y, z: 0 }, orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) } },
+  });
+  addLog(`Goal sent: ${x.toFixed(2)}, ${y.toFixed(2)}, ${deg} deg`);
 }
 
-function mvSetGray(gray, w, h, res, origin, label) {
-    mv.gray = gray; mv.w = w; mv.h = h; mv.res = res; mv.origin = origin; mv.label = label;
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const cx = c.getContext('2d');
-    const img = cx.createImageData(w, h), d = img.data;
-    for (let i = 0, n = w * h; i < n; i++) {
-        const g = gray[i], k = i * 4;
-        d[k] = d[k + 1] = d[k + 2] = g; d[k + 3] = 255;
-    }
-    cx.putImageData(img, 0, 0);
-    mv.img = c;
-    mv.pts = [];
-    mvFit();
-    $mv('mv-sub').textContent = label + ' · ' + w + '×' + h + ' px · ' + res.toFixed(3) + ' m/px';
-    mvReadout();
-}
-
-function mvLoadLive() {
-    if (!latestMap) {
-        mv.img = null; mv.gray = null;
-        $mv('mv-sub').textContent = 'No map received yet';
-        mvDraw();
-        notify('WARNING', 'No live map yet - waiting for ' + TOPICS.map + '. You can also open a .pgm file.');
-        return;
-    }
-    const m = latestMap, gray = new Uint8Array(m.w * m.h);
-    for (let j = 0; j < m.h; j++) {
-        for (let i = 0; i < m.w; i++) {
-            const v = m.data[j * m.w + i];
-            let g = PGM_UNKNOWN;
-            if (v >= 0) g = v >= OCC_THRESH ? PGM_OCC : (v <= FREE_THRESH ? PGM_FREE : PGM_UNKNOWN);
-            gray[(m.h - 1 - j) * m.w + i] = g;
-        }
-    }
-    mvSetGray(gray, m.w, m.h, m.res, { x: m.ox, y: m.oy }, 'Live map (PGM view)');
-}
-
-function parsePGM(buf) {
-    const u8 = new Uint8Array(buf);
-    let pos = 0;
-    const tok = () => {
-        while (pos < u8.length) {
-            const ch = u8[pos];
-            if (ch === 35) { while (pos < u8.length && u8[pos] !== 10) pos++; }
-            else if (ch <= 32) pos++;
-            else break;
-        }
-        let s = '';
-        while (pos < u8.length && u8[pos] > 32) s += String.fromCharCode(u8[pos++]);
-        return s;
-    };
-    const magic = tok();
-    if (magic !== 'P5' && magic !== 'P2') throw new Error('not a PGM file (expected P5 or P2)');
-    const w = parseInt(tok(), 10), h = parseInt(tok(), 10), maxv = parseInt(tok(), 10);
-    if (!(w > 0 && h > 0 && maxv > 0 && maxv < 65536)) throw new Error('invalid PGM header');
-    const gray = new Uint8Array(w * h);
-    if (magic === 'P5') {
-        pos++;
-        const bytes = maxv < 256 ? 1 : 2;
-        if (pos + w * h * bytes > u8.length) throw new Error('PGM data is truncated');
-        for (let i = 0; i < w * h; i++) {
-            const v = bytes === 1 ? u8[pos + i] : ((u8[pos + 2 * i] << 8) | u8[pos + 2 * i + 1]);
-            gray[i] = Math.round(v * 255 / maxv);
-        }
-    } else {
-        for (let i = 0; i < w * h; i++) gray[i] = Math.round(parseInt(tok(), 10) * 255 / maxv);
-    }
-    return { gray, w, h };
-}
-
-function parseMapYaml(text) {
-    const out = {};
-    let m = /resolution:\s*([-+\d.eE]+)/.exec(text); if (m) out.res = parseFloat(m[1]);
-    m = /origin:\s*\[\s*([-+\d.eE]+)\s*,\s*([-+\d.eE]+)/.exec(text); if (m) out.origin = { x: parseFloat(m[1]), y: parseFloat(m[2]) };
-    m = /negate:\s*(\d)/.exec(text); if (m) out.negate = m[1] === '1';
-    return out;
-}
-
-function mvImageToGray(file) {
-    return new Promise((resolve, reject) => {
-        const url = URL.createObjectURL(file), im = new Image();
-        im.onload = () => {
-            const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
-            const cx = c.getContext('2d'); cx.drawImage(im, 0, 0);
-            const d = cx.getImageData(0, 0, c.width, c.height).data, g = new Uint8Array(c.width * c.height);
-            for (let i = 0; i < g.length; i++) g[i] = d[i * 4];
-            URL.revokeObjectURL(url);
-            resolve({ gray: g, w: c.width, h: c.height });
-        };
-        im.onerror = () => { URL.revokeObjectURL(url); reject(new Error('cannot decode image')); };
-        im.src = url;
-    });
-}
-
-async function mvLoadFiles(files) {
-    if (!files.length) return;
-    const img = files.find(f => /\.(pgm|png|jpe?g)$/i.test(f.name));
-    const yml = files.find(f => /\.ya?ml$/i.test(f.name));
-    $mv('mv-file').value = '';
-    if (!img) { notify('WARNING', 'Select a .pgm file (and optionally its .yaml).'); return; }
-    try {
-        const parsed = /\.pgm$/i.test(img.name) ? parsePGM(await img.arrayBuffer()) : await mvImageToGray(img);
-        let res = latestMap ? latestMap.res : 0.05, origin = null, note = '';
-        if (yml) {
-            const y = parseMapYaml(await yml.text());
-            if (y.res) res = y.res;
-            if (y.origin) origin = y.origin;
-            if (y.negate) for (let i = 0; i < parsed.gray.length; i++) parsed.gray[i] = 255 - parsed.gray[i];
-        } else {
-            note = ' (no .yaml selected - assuming ' + res.toFixed(3) + ' m/px)';
-        }
-        mvSetGray(parsed.gray, parsed.w, parsed.h, res, origin, img.name);
-        mvDraw();
-        if (note) notify('INFO', 'Loaded ' + img.name + note);
-    } catch (e) {
-        notify('ERROR', 'Could not open map: ' + e.message);
-    }
-}
-
-function mvDownloadPGM() {
-    if (!mv.gray) { notify('WARNING', 'No map to download yet.'); return; }
-    const head = 'P5\n# CREATOR: Milusions WareGV Suite ' + mv.res.toFixed(3) + ' m/pix\n' + mv.w + ' ' + mv.h + '\n255\n';
-    const hb = new TextEncoder().encode(head), out = new Uint8Array(hb.length + mv.gray.length);
-    out.set(hb, 0); out.set(mv.gray, hb.length);
-    const base = ($mv('map-name-input').value || 'map').trim().replace(/[^\w.\-]+/g, '_') || 'map';
-    downloadBlob(new Blob([out], { type: 'image/x-portable-graymap' }), base + '.pgm');
-}
-
-function mvFit() {
-    if (!mv.img) return;
-    const W = mv.canvas.clientWidth || 800, H = mv.canvas.clientHeight || 500;
-    mv.s = Math.min(W / mv.w, H / mv.h) * 0.96;
-    mv.tx = (W - mv.w * mv.s) / 2;
-    mv.ty = (H - mv.h * mv.s) / 2;
-}
-function mvFitBtn() { mvFit(); mvDraw(); }
-function mvZoomAt(sx, sy, f) {
-    const s0 = mv.s;
-    const fit = Math.min((mv.canvas.clientWidth || 800) / mv.w, (mv.canvas.clientHeight || 500) / mv.h);
-    mv.s = Math.max(fit * 0.2, Math.min(60, s0 * f));
-    const k = mv.s / s0;
-    mv.tx = sx - (sx - mv.tx) * k;
-    mv.ty = sy - (sy - mv.ty) * k;
-    mvReadout(); mvDraw();
-}
-function mvZoomBtn(f) { mvZoomAt((mv.canvas.clientWidth || 800) / 2, (mv.canvas.clientHeight || 500) / 2, f); }
-const mvToImg = (sx, sy) => ({ u: (sx - mv.tx) / mv.s, v: (sy - mv.ty) / mv.s });
-
-function mvToggleMeasure() {
-    mv.measure = !mv.measure;
-    $mv('mv-measure-btn').classList.toggle('on', mv.measure);
-    mv.canvas.style.cursor = mv.measure ? 'crosshair' : 'grab';
-    if (!mv.measure) mv.pts = [];
-    $mv('mv-hint').textContent = mv.measure
-        ? 'Measure: click a first point, then a second point. Drag to pan, wheel to zoom.'
-        : 'Drag to pan · wheel to zoom · press Measure (or M) to measure distances.';
-    mvDraw();
-}
-function mvClearMeasure() { mv.pts = []; mvDraw(); }
-function mvAddPoint(sx, sy) {
-    const p = mvToImg(sx, sy);
-    if (p.u < 0 || p.v < 0 || p.u > mv.w || p.v > mv.h) return;
-    if (mv.pts.length >= 2) mv.pts = [];
-    mv.pts.push(p);
-    mvReadout(); mvDraw();
-}
-const mvDist = (a, b) => Math.hypot(a.u - b.u, a.v - b.v) * mv.res;
-
-function mvReadout() {
-    const el = $mv('mv-readout');
-    if (!el) return;
-    let txt = '';
-    if (mv.hover && mv.img) {
-        const p = mvToImg(mv.hover.sx, mv.hover.sy);
-        if (p.u >= 0 && p.v >= 0 && p.u < mv.w && p.v < mv.h) {
-            txt = 'px ' + Math.floor(p.u) + ', ' + Math.floor(p.v);
-            if (mv.origin) txt += ' · x ' + (mv.origin.x + p.u * mv.res).toFixed(2) + ' y ' + (mv.origin.y + (mv.h - p.v) * mv.res).toFixed(2) + ' m';
-        }
-    }
-    if (mv.pts.length === 2) txt = 'Distance ' + mvDist(mv.pts[0], mv.pts[1]).toFixed(3) + ' m   ' + (txt ? '· ' + txt : '');
-    el.textContent = txt;
-}
-
-function mvDraw() {
-    if (!mv.ready || !mv.open) return;
-    const c = mv.canvas, dpr = window.devicePixelRatio || 1;
-    const W = c.clientWidth, H = c.clientHeight;
-    if (!W || !H) return;
-    if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) {
-        c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
-        if (mv.img && !mv._fitted) { mvFit(); mv._fitted = true; }
-    }
-    const ctx = mv.ctx;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = theme['--map-bg'] || '#111'; ctx.fillRect(0, 0, W, H);
-
-    if (!mv.img) {
-        ctx.fillStyle = theme['--muted'] || '#888'; ctx.font = '500 13px Roboto, sans-serif';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('No map data yet - waiting for ' + TOPICS.map + ' (or open a .pgm file)', W / 2, H / 2);
-        return;
-    }
-
-    ctx.save();
-    ctx.imageSmoothingEnabled = mv.s < 1;
-    ctx.drawImage(mv.img, mv.tx, mv.ty, mv.w * mv.s, mv.h * mv.s);
-    ctx.strokeStyle = theme['--border'] || '#444'; ctx.lineWidth = 1;
-    ctx.strokeRect(mv.tx + 0.5, mv.ty + 0.5, mv.w * mv.s, mv.h * mv.s);
-    ctx.restore();
-
-    const S = (p) => [mv.tx + p.u * mv.s, mv.ty + p.v * mv.s];
-    const pts = mv.pts.slice();
-    let live = false;
-    if (mv.measure && pts.length === 1 && mv.hover) { pts.push(mvToImg(mv.hover.sx, mv.hover.sy)); live = true; }
-    if (pts.length) {
-        const col = '#ff3b30';
-        ctx.lineWidth = 2; ctx.strokeStyle = col; ctx.fillStyle = col;
-        if (pts.length === 2) {
-            const a = S(pts[0]), b = S(pts[1]);
-            ctx.save(); if (live) ctx.setLineDash([6, 4]);
-            ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.restore();
-            const label = mvDist(pts[0], pts[1]).toFixed(2) + ' m';
-            ctx.font = '700 12px Roboto, sans-serif';
-            const tw = ctx.measureText(label).width + 14, mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-            ctx.fillStyle = 'rgba(20,22,26,.92)'; ctx.strokeStyle = col; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.roundRect ? ctx.roundRect(mx - tw / 2, my - 24, tw, 20, 5) : ctx.rect(mx - tw / 2, my - 24, tw, 20);
-            ctx.fill(); ctx.stroke();
-            ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mx, my - 14);
-        }
-        pts.forEach((p, i) => {
-            if (live && i === 1) return;
-            const q = S(p);
-            ctx.fillStyle = col; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(q[0], q[1], 5, 0, 7); ctx.fill(); ctx.stroke();
-        });
-    }
-
-    const pxPerM = mv.s / mv.res;
-    const nice = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100].find(n => n * pxPerM >= 70) || 100;
-    const len = nice * pxPerM, bx = 14, by = H - 16;
-    ctx.fillStyle = 'rgba(20,22,26,.8)'; ctx.fillRect(bx - 6, by - 20, len + 12, 28);
-    ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(bx, by - 4); ctx.lineTo(bx, by); ctx.lineTo(bx + len, by); ctx.lineTo(bx + len, by - 4); ctx.stroke();
-    ctx.font = '600 11px Roboto, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-    ctx.fillText(nice + ' m', bx, by - 6);
-}
-
-function openMapViewer() {
-    mvEnsureInit();
-    mv.root.hidden = false;
-    mv.open = true;
-    mv._fitted = false;
-    $mv('mv-measure-btn').classList.toggle('on', mv.measure);
-    mv.canvas.style.cursor = mv.measure ? 'crosshair' : 'grab';
-    if (!mv.gray || mv.label.indexOf('Live map') === 0) mvLoadLive();
-    requestAnimationFrame(() => { if (mv.img) mvFit(); mvDraw(); });
-}
-function closeMapViewer() {
-    if (!mv.ready) return;
-    mv.open = false;
-    mv.root.hidden = true;
-    mv.drag = null;
-}
-function mvUseLive() { mvLoadLive(); mvDraw(); }
-
-Object.assign(window, { openMapViewer, closeMapViewer, mvToggleMeasure, mvClearMeasure, mvFitBtn, mvZoomBtn, mvUseLive, mvDownloadPGM });
-
-// =====================================================================
-//  Sound FX
-// =====================================================================
-let audioCtx = null;
-function initAudio() {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-}
-function tone(type, f0, f1, gain0, dur, ramp) {
-    try {
-        initAudio();
-        const now = audioCtx.currentTime;
-        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
-        osc.type = type;
-        osc.frequency.setValueAtTime(f0, now);
-        if (f1) osc.frequency[ramp || 'linearRampToValueAtTime'](f1, now + dur * 0.6);
-        gain.gain.setValueAtTime(gain0, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
-        osc.connect(gain); gain.connect(audioCtx.destination);
-        osc.start(now); osc.stop(now + dur);
-    } catch (e) {}
-}
-function playListenSound() { tone('sine', 587.33, 880, 0.12, 0.2); }
-function playProcessingSound() {
-    tone('triangle', 500, 640, 0.08, 0.09);
-    notifyHelioState('sound_play', 'thinking', '', 'thinking_blip');
-}
-function playErrorSound() {
-    tone('sawtooth', 300, 140, 0.22, 0.4, 'exponentialRampToValueAtTime');
-    notifyHelioState('sound_play', agentState, '', 'error_buzz');
-}
-
-const MicLevels = {
-    stream: null, analyser: null, data: null, active: false,
-    async start() {
-        if (this.active) return;
-        try {
-            initAudio();
-            this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        } catch (_) { return; }
-        const src = audioCtx.createMediaStreamSource(this.stream);
-        this.analyser = audioCtx.createAnalyser();
-        this.analyser.fftSize = 256;
-        this.analyser.smoothingTimeConstant = 0.85;
-        src.connect(this.analyser);
-        this.data = new Uint8Array(this.analyser.frequencyBinCount);
-        this.active = true;
-    },
-    level() {
-        if (!this.active || !this.analyser) return 0;
-        this.analyser.getByteFrequencyData(this.data);
-        let sum = 0;
-        for (let i = 0; i < this.data.length; i++) sum += this.data[i];
-        return Math.min(1, (sum / this.data.length) / 85);
-    },
-    stop() {
-        this.active = false;
-        if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
-    }
-};
-
-const EyeMotion = {
-    raf: null,
-    gazeX: 0, gazeY: 0, targetX: 0, targetY: 0,
-    nextGazeAt: 0, nextSmileAt: 0,
-    start() {
-        this.stop();
-        const now = performance.now();
-        this.gazeX = this.gazeY = this.targetX = this.targetY = 0;
-        this.nextGazeAt = now + 1800;
-        this.nextSmileAt = now + 5000 + Math.random() * 4000;
-        this.loop();
-    },
-    stop() {
-        if (this.raf) cancelAnimationFrame(this.raf);
-        this.raf = null;
-        if (robotFace) {
-            robotFace.querySelectorAll('.eye').forEach((e) => { e.style.transform = ''; });
-            robotFace.classList.remove('happy');
-        }
-    },
-    loop() {
-        if (!helioOpen || agentState !== 'listening') { this.raf = null; return; }
-        const now = performance.now();
-        if (now > this.nextGazeAt) {
-            this.targetX = (Math.random() * 2 - 1) * 26;
-            this.targetY = (Math.random() * 2 - 1) * 12;
-            this.nextGazeAt = now + 3800 + Math.random() * 4200;
-        }
-        if (now > this.nextSmileAt && robotFace) {
-            robotFace.classList.add('happy');
-            setTimeout(() => { if (robotFace) robotFace.classList.remove('happy'); }, 1800 + Math.random() * 1400);
-            this.nextSmileAt = now + 7000 + Math.random() * 7000;
-        }
-        this.gazeX += (this.targetX - this.gazeX) * 0.012;
-        this.gazeY += (this.targetY - this.gazeY) * 0.012;
-        const level = MicLevels.level();
-        if (robotFace) {
-            const scale = 1 + level * 0.14;
-            robotFace.querySelectorAll('.eye').forEach((eye) => {
-                eye.style.transform = `translate(${this.gazeX.toFixed(1)}px, ${this.gazeY.toFixed(1)}px) scaleY(${scale.toFixed(3)})`;
-            });
-        }
-        this.raf = requestAnimationFrame(() => this.loop());
-    }
-};
-
-const TalkAnimator = {
-    timer: null,
-    start() {
-        this.stop();
-        this.timer = setInterval(() => {
-            if (!robotFace || agentState !== 'speaking') return;
-            robotFace.querySelectorAll('.eye').forEach((eye, i) => {
-                const s = 0.6 + Math.random() * 0.5;
-                const lift = (Math.random() * 2 - 1) * 3;
-                eye.style.transform = `scaleY(${s.toFixed(2)}) translateY(${lift.toFixed(1)}px)`;
-            });
-        }, 170);
-    },
-    stop() {
-        if (this.timer) clearInterval(this.timer);
-        this.timer = null;
-        if (robotFace) robotFace.querySelectorAll('.eye').forEach((e) => { e.style.transform = ''; });
-    }
-};
-
-let blinkTimer = null;
-function scheduleBlink() {
-    if (blinkTimer) clearTimeout(blinkTimer);
-    blinkTimer = setTimeout(() => {
-        if (helioOpen && robotFace && agentState !== 'thinking') {
-            robotFace.classList.remove('blink'); void robotFace.offsetWidth; robotFace.classList.add('blink');
-        }
-        scheduleBlink();
-    }, 3200 + Math.random() * 3200);
-}
-
-// =====================================================================
-//  HELIO VOICE ASSISTANT
-// =====================================================================
-const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BASE_SPEECH_LANG = (navigator.language || '').toLowerCase().startsWith('en') ? navigator.language : 'en-US';
-const SILENCE_COMMIT_MS = 1500;
-const LOW_CONFIDENCE_GRACE_MS = 800;
-const CONFIDENCE_THRESHOLD = 0.6;
-const HELIO_TIMEOUT_MS = 20000;
-
-const modal = document.getElementById('voice-modal');
-const robotFace = document.getElementById('robot-face');
-const robotScreen = document.getElementById('robot-screen');
-const helioDots = document.getElementById('helio-dots');
-const historyListEl = document.getElementById('history-list');
-
-let recognition = null;
-let recognitionRestartTimer = null;
-let recognitionRestartDelay = 400;
-let recognitionFlapCount = 0, recognitionFlapWindowStart = 0, recognitionCoolingDown = false;
-const RECOGNITION_FLAP_LIMIT = 6, RECOGNITION_FLAP_WINDOW_MS = 10000, RECOGNITION_COOLDOWN_MS = 6000;
-let silenceCommitTimer = null;
-let lowConfidenceTimer = null;
-let transcriptText = '';
-let interimText = '';
-let confidenceSum = 0;
-let confidenceCount = 0;
-let speechActive = false;
-let helioOpen = false;
-let agentState = 'idle';
-let currentCallId = null;
-let selectedLanguage = (navigator.language || '').toLowerCase().startsWith('hi') ? 'hi' : 'en';
-let wakeLanguageOverride = null;
-let thinkingTimer = null;
-let commandSeq = 0;
-let lastSpeechNetworkWarn = 0;
-window.currentUtterance = null;
-
-const speechLang = () => selectedLanguage === 'hi' ? 'hi-IN' : BASE_SPEECH_LANG;
-
-function detectSpeechLanguage(text) {
-    const value = String(text || '');
-    if (/\p{Script=Devanagari}/u.test(value)) return 'hi';
-    if (/[A-Za-z]/.test(value)) return 'en';
-    return selectedLanguage;
-}
-
-function applyDetectedLanguage(text) {
-    if (wakeLanguageOverride) {
-        selectedLanguage = wakeLanguageOverride;
-        if (recognition) recognition.lang = speechLang();
-        return;
-    }
-    const detected = detectSpeechLanguage(text);
-    if (detected === selectedLanguage) return;
-    selectedLanguage = detected;
-    if (recognition) recognition.lang = speechLang();
-}
-
-const PeekController = {
-    messages: [
-        'Ever wondered if you could control a rover hands free?',
-        'Hey there, how are you?',
-        'Controlling a rover, I see!',
-        'Hey, what is this button?'
-    ],
-    timer: null,
-    hideTimer: null,
-    start() {
-        this.stop();
-        this.timer = setInterval(() => this.show(), 6500);
-        setTimeout(() => this.show(), 1400);
-    },
-    stop() {
-        if (this.timer) clearInterval(this.timer);
-        if (this.hideTimer) clearTimeout(this.hideTimer);
-        this.timer = null; this.hideTimer = null;
-        const c = document.getElementById('helio-peek'), b = document.getElementById('peek-bubble');
-        if (c) c.classList.remove('peeking');
-        if (b) b.classList.remove('show');
-    },
-    show() {
-        const container = document.getElementById('helio-peek');
-        const bubble = document.getElementById('peek-bubble');
-        if (!container || !bubble || helioOpen) return;
-        bubble.textContent = this.messages[Math.floor(Math.random() * this.messages.length)];
-        container.classList.add('peeking');
-        bubble.classList.add('show');
-        if (this.hideTimer) clearTimeout(this.hideTimer);
-        this.hideTimer = setTimeout(() => {
-            container.classList.remove('peeking');
-            setTimeout(() => bubble.classList.remove('show'), 650);
-        }, 3500);
-    }
-};
-
-const HelioIdleController = {
-    bubbleTimer: null,
-    phrases: ['I am here when you need me.', 'Checking the rover state...', 'Ready for your next command.'],
-    start() {
-        this.stop();
-        this.bubbleTimer = setInterval(() => this.thought(), 9000);
-    },
-    stop() {
-        if (this.bubbleTimer) clearInterval(this.bubbleTimer);
-        this.bubbleTimer = null;
-        const bubble = document.getElementById('helio-idle-bubble');
-        if (bubble) bubble.classList.remove('show');
-    },
-    thought() {
-        if (!helioOpen || agentState !== 'listening' || speechActive) return;
-        const bubble = document.getElementById('helio-idle-bubble');
-        if (!bubble) return;
-        bubble.textContent = this.phrases[Math.floor(Math.random() * this.phrases.length)];
-        bubble.classList.add('show');
-        setTimeout(() => bubble.classList.remove('show'), 3200);
-    }
-};
-
-let outputTranscript = '';
-function setVoiceStatus() {}
-function renderTranscript() {
-    const el = document.getElementById('helio-transcript');
-    const typeRow = document.getElementById('helio-type-row');
-    if (!el) return;
-    const input = [transcriptText, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-    el.innerHTML = '';
-    if (input) {
-        const inLine = document.createElement('div');
-        inLine.className = 'helio-transcript-in';
-        inLine.textContent = input;
-        el.appendChild(inLine);
-    }
-    if (outputTranscript) {
-        const outLine = document.createElement('div');
-        outLine.className = 'helio-transcript-out';
-        outLine.textContent = outputTranscript;
-        el.appendChild(outLine);
-    }
-    el.classList.toggle('show', !!(input || outputTranscript));
-
-    if (typeRow) {
-        const showType = helioOpen && agentState === 'listening' && !input;
-        typeRow.classList.toggle('show', showType);
-    }
-}
-
-function setFace(state) {
-    if (robotFace) robotFace.className = 'robot-face ' + state;
-    if (helioDots) helioDots.classList.toggle('show', state === 'thinking');
-    if (state === 'listening') { HelioIdleController.start(); MicLevels.start(); EyeMotion.start(); }
-    else { HelioIdleController.stop(); MicLevels.stop(); EyeMotion.stop(); }
-    if (state === 'speaking') TalkAnimator.start(); else TalkAnimator.stop();
-}
-
-function setTeleprompter() {}
-
-function appendHistory(sender, text) {
-    if (!historyListEl || !text) return;
-    const item = document.createElement('div');
-    item.className = 'history-item ' + sender;
-    const label = document.createElement('div');
-    label.className = 'history-label';
-    label.textContent = sender === 'you' ? 'you:' : 'agent:';
-    const content = document.createElement('div');
-    if (sender !== 'you' && typeof marked !== 'undefined' && marked.parse) {
-        try { content.innerHTML = marked.parse(String(text)); } catch (_) { content.textContent = text; }
-    } else {
-        content.textContent = text;
-    }
-    item.append(label, content);
-    historyListEl.appendChild(item);
-    historyListEl.scrollTop = historyListEl.scrollHeight;
-}
-
-function clearVoiceTimers() {
-    if (silenceCommitTimer) clearTimeout(silenceCommitTimer);
-    if (lowConfidenceTimer) clearTimeout(lowConfidenceTimer);
-    if (recognitionRestartTimer) clearTimeout(recognitionRestartTimer);
-    silenceCommitTimer = null; lowConfidenceTimer = null; recognitionRestartTimer = null;
-}
-
-function startThinkingIndicator() {
-    stopThinkingIndicator();
-    notifyHelioState('thinking_start', 'thinking', '', '');
-    playProcessingSound();
-    thinkingTimer = setInterval(() => playProcessingSound(), 900);
-}
-function stopThinkingIndicator() {
-    if (thinkingTimer) clearInterval(thinkingTimer);
-    thinkingTimer = null;
-    notifyHelioState('thinking_stop', 'idle', '', '');
-}
-
-function desiredListening() {
-    return helioOpen ? (agentState === 'listening') : (wakeEnabled && !wakeBlocked);
-}
-function recognitionStart() {
-    if (!recognition || !desiredListening()) return;
-    try { recognition.start(); }
-    catch (_) { recognitionRestartTimer = setTimeout(() => recognitionStart(), 180); }
-}
-function recognitionStop() {
-    try { recognition && recognition.abort(); } catch (_) {}
-}
-function scheduleRecognitionRestart() {
-    if (!desiredListening()) return;
-    if (recognitionRestartTimer) clearTimeout(recognitionRestartTimer);
-    recognitionRestartTimer = setTimeout(() => { recognitionRestartTimer = null; recognitionStart(); }, recognitionRestartDelay);
-}
-function syncEngine() {
-    if (desiredListening()) recognitionStart(); else recognitionStop();
-}
-
-function pendingText() {
-    return [transcriptText.trim(), interimText.trim()].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function scheduleSilenceCommit() {
-    if (silenceCommitTimer) clearTimeout(silenceCommitTimer);
-    if (lowConfidenceTimer) { clearTimeout(lowConfidenceTimer); lowConfidenceTimer = null; }
-    silenceCommitTimer = setTimeout(() => {
-        silenceCommitTimer = null;
-        if (!helioOpen || agentState !== 'listening' || !pendingText()) return;
-        const confidence = confidenceCount ? confidenceSum / confidenceCount : 1;
-        if (confidence >= CONFIDENCE_THRESHOLD) {
-            commitTranscript();
-        } else {
-            setVoiceStatus('WAITING FOR CLEAR SPEECH', true);
-            lowConfidenceTimer = setTimeout(() => {
-                lowConfidenceTimer = null;
-                if (helioOpen && agentState === 'listening' && pendingText()) commitTranscript();
-            }, LOW_CONFIDENCE_GRACE_MS);
-        }
-    }, SILENCE_COMMIT_MS);
-}
-
-function submitTypedCommand(rawText) {
-    const text = (rawText || '').trim();
-    if (!text || !helioOpen) return;
-    clearVoiceTimers();
-    recognitionStop();
-    transcriptText = text; interimText = '';
-    confidenceSum = 0; confidenceCount = 0;
-    renderTranscript();
-    notifyHelioState('listening_stop', 'thinking', '', '');
-    notifyHelioState('input_received', 'thinking', text, '');
-    appendHistory('you', text);
-    transcriptText = '';
-    handleCommand(text);
-}
-
-function commitTranscript() {
-    const text = pendingText();
-    if (!text || agentState !== 'listening') return;
-    clearVoiceTimers();
-    recognitionStop();
-    interimText = ''; transcriptText = '';
-    confidenceSum = 0; confidenceCount = 0;
-
-    notifyHelioState('listening_stop', 'thinking', '', '');
-    notifyHelioState('input_received', 'thinking', text, '');
-
-    renderTranscript();
-    appendHistory('you', text);
-    handleCommand(text);
-}
-
-function bindRecognition() {
-    if (!SpeechRecognitionImpl) return;
-    recognition = new SpeechRecognitionImpl();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 3;
-    recognition.lang = BASE_SPEECH_LANG;
-
-    recognition.onstart = () => {
-        if (!helioOpen) return;
-        agentState = 'listening';
-        speechActive = true;
-        notifyHelioState('listening_start', 'listening', '', '');
-        setVoiceStatus('LISTENING CONTINUOUSLY', true);
-        setFace('listening');
-    };
-
-    recognition.onresult = (event) => {
-        recognitionRestartDelay = 400;
-        recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
-
-        if (!helioOpen) {
-            for (let i = event.resultIndex; i < event.results.length; i += 1) {
-                const heard = ((event.results[i][0] && event.results[i][0].transcript) || '').toLowerCase();
-                if (!heard) continue;
-                if (WAKE_PATTERNS.robot.test(heard)) { triggerWake('robot'); return; }
-                if (WAKE_PATTERNS.jojo.test(heard)) { triggerWake('jojo'); return; }
-            }
-            return;
-        }
-
-        if (agentState !== 'listening') return;
-        let currentInterim = '';
-        for (let i = event.resultIndex; i < event.results.length; i += 1) {
-            const result = event.results[i];
-            const alt = result[0];
-            const text = ((alt && alt.transcript) || '').trim();
-            if (!text) continue;
-            if (result.isFinal) {
-                transcriptText = (transcriptText + ' ' + text).replace(/\s+/g, ' ').trim();
-                const confidence = Number(alt && alt.confidence);
-                if (Number.isFinite(confidence) && confidence > 0) { confidenceSum += confidence; confidenceCount += 1; }
-            } else {
-                currentInterim = (currentInterim + ' ' + text).trim();
-            }
-        }
-        interimText = currentInterim;
-        notifyHelioState('listening_update', 'listening', pendingText(), '');
-
-        applyDetectedLanguage([transcriptText, interimText].join(' '));
-        speechActive = true;
-        setVoiceStatus('LISTENING CONTINUOUSLY', true);
-        renderTranscript();
-        if (pendingText()) scheduleSilenceCommit();
-    };
-
-    recognition.onerror = (event) => {
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed' || event.error === 'audio-capture') {
-            if (helioOpen) {
-                agentState = 'idle';
-                speechActive = false;
-                setVoiceStatus('MICROPHONE UNAVAILABLE');
-                setFace('listening');
-                setTeleprompter('Microphone permission is required (allow mic access and tap Ask Helio again).', 'helio');
-            } else {
-                wakeBlocked = true;
-                updateWakeBtn();
-            }
-            return;
-        }
-        if (event.error === 'network') {
-            recognitionRestartDelay = 2500;
-            if (Date.now() - lastSpeechNetworkWarn > 15000) {
-                lastSpeechNetworkWarn = Date.now();
-                notify('ERROR', 'Speech recognition needs an internet connection.');
-            }
-        }
-        if (helioOpen) setVoiceStatus('LISTENING CONTINUOUSLY', true);
-    };
-
-    recognition.onend = () => {
-        speechActive = false;
-        if (!desiredListening()) return;
-
-        const now = Date.now();
-        if (now - recognitionFlapWindowStart > RECOGNITION_FLAP_WINDOW_MS) { recognitionFlapWindowStart = now; recognitionFlapCount = 0; }
-        recognitionFlapCount++;
-        if (recognitionFlapCount > RECOGNITION_FLAP_LIMIT) {
-            if (!recognitionCoolingDown) {
-                recognitionCoolingDown = true;
-                if (helioOpen) setVoiceStatus('STABILIZING MICROPHONE...');
-            }
-            recognitionRestartTimer = setTimeout(() => {
-                recognitionRestartTimer = null; recognitionCoolingDown = false;
-                recognitionFlapCount = 0; recognitionFlapWindowStart = Date.now();
-                scheduleRecognitionRestart();
-            }, RECOGNITION_COOLDOWN_MS);
-            return;
-        }
-        scheduleRecognitionRestart();
-    };
-}
-
-function triggerWake(key) {
-    wakeWord = key;
-    wakeLanguageOverride = key === 'jojo' ? 'hi' : 'en';
-    selectedLanguage = wakeLanguageOverride;
-    try { localStorage.setItem('milusions-wake-word', key); } catch (_) {}
-    updateWakeBtn();
-    activateHelio(key === 'jojo' ? 'क्या?' : 'What?');
-}
-
-function resumeListening() {
-    if (!helioOpen) return;
-    agentState = 'listening';
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
-    renderTranscript();
-    setVoiceStatus('LISTENING CONTINUOUSLY', true);
-    setFace('listening');
-    setTeleprompter('', 'user');
-    recognitionStart();
-}
-
-function openVoiceModal() {
-    if (!SpeechRecognitionImpl) {
-        alert('Continuous speech recognition is not supported in this browser. Use Chrome or Edge.');
-        return;
-    }
-    wakeBlocked = false;
-    updateWakeBtn();
-    activateHelio();
-}
-
-function activateHelio(greeting) {
-    recognitionStop();
-    helioOpen = true;
-    notifyHelioState('helio_on', 'waking', '', 'helio_wake');
-
-    if (modal) { modal.classList.add('active'); modal.setAttribute('aria-hidden', 'false'); }
-    const hist = document.getElementById('modal-history-column'); if (hist) hist.classList.remove('show');
-    PeekController.stop();
-
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
-    renderTranscript();
-    clearVoiceTimers();
-    commandSeq += 1;
-    const seq = commandSeq;
-    currentCallId = currentCallId || String(Date.now());
-    recognition.lang = speechLang();
-
-    agentState = 'speaking';
-    if (robotFace) robotFace.className = 'robot-face waking';
-    const say = greeting || (wakeLanguageOverride === 'hi' ? 'क्या?' : 'What?');
-    speakText(say, { pitch: 1.0, rate: 0.72, volume: 1 }).then(() => {
-        if (!helioOpen || seq !== commandSeq) return;
-        resumeListening();
-        scheduleBlink();
-    });
-}
-
-function closeVoiceModal() {
-    helioOpen = false;
-    agentState = 'idle';
-    speechActive = false;
-    notifyHelioState('helio_off', 'idle', '', '');
-
-    commandSeq += 1;
-    clearVoiceTimers();
-    recognitionStop();
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    stopThinkingIndicator();
-    MicLevels.stop();
-    TalkAnimator.stop();
-    EyeMotion.stop();
-    if (blinkTimer) { clearTimeout(blinkTimer); blinkTimer = null; }
-    if (modal) { modal.classList.remove('active'); modal.setAttribute('aria-hidden', 'true'); }
-    transcriptText = ''; interimText = ''; confidenceSum = 0; confidenceCount = 0; outputTranscript = '';
-    renderTranscript();
-    if (recognition) recognition.lang = BASE_SPEECH_LANG;
-    PeekController.start();
-    syncEngine();
-}
-
-function cleanForSpeech(t) {
-    return String(t || '')
-        .replace(/```[\s\S]*?```/g, ' ')
-        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-        .replace(/[*_`#>~]+/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-let cachedVoice = null, cachedVoiceLang = null;
-function pickVoice(lang) {
-    if (!('speechSynthesis' in window)) return null;
-    const voices = window.speechSynthesis.getVoices() || [];
-    if (!voices.length) return null;
-    if (cachedVoice && cachedVoiceLang === lang && voices.includes(cachedVoice)) return cachedVoice;
-    const base = lang.slice(0, 2);
-    const wanted = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith(base));
-    const pool = wanted.length ? wanted : voices;
-    const preferred = pool.find((v) => /natural|enhanced|premium|neural/i.test(v.name)) || pool[0];
-    cachedVoice = preferred; cachedVoiceLang = lang;
-    return preferred;
-}
-
-function speakText(text, opts) {
-    opts = opts || {};
-    const spoken = cleanForSpeech(text);
-    if (!('speechSynthesis' in window) || !spoken) return Promise.resolve();
-    applyDetectedLanguage(spoken);
-    try { window.speechSynthesis.cancel(); } catch (_) {}
-
-    const chunks = opts.pitch != null
-        ? [spoken]
-        : spoken.split(/(?<=[.!?])\s+/).filter(Boolean);
-    if (!chunks.length) chunks.push(spoken);
-
-    const lang = speechLang();
-    const voice = pickVoice(lang);
-
-    return chunks.reduce((chain, chunk, i) => chain.then(() => new Promise((resolve) => {
-        if (!helioOpen && !opts.forceIntro) { resolve(); return; }
-
-        notifyHelioState('speaking_start', 'speaking', chunk, '');
-
-        let finished = false, wd = null;
-        const finish = () => {
-            if (finished) return;
-            finished = true;
-            clearTimeout(wd);
-            notifyHelioState('speaking_end', 'idle', chunk, '');
-            resolve();
-        };
-
-        const u = new SpeechSynthesisUtterance(chunk);
-        u.lang = lang;
-        if (voice) u.voice = voice;
-        const isQuestion = /\?\s*$/.test(chunk);
-        const isExclaim = /!\s*$/.test(chunk);
-        u.pitch = opts.pitch != null ? opts.pitch
-            : (isExclaim ? 1.18 : isQuestion ? 1.12 : 1.0) + (Math.random() * 0.08 - 0.04);
-        u.rate = opts.rate != null ? opts.rate : 1.0 + (Math.random() * 0.08 - 0.04);
-        u.volume = opts.volume != null ? opts.volume : 1;
-        u.onend = finish;
-        u.onerror = finish;
-        wd = setTimeout(finish, 2500 + chunk.length * 110);
-        window.currentUtterance = u;
-        window.speechSynthesis.speak(u);
-    })), Promise.resolve());
-}
-
-async function handleCommand(text) {
-    const seq = ++commandSeq;
-    const alive = () => helioOpen && seq === commandSeq;
-
-    agentState = 'thinking';
-    setVoiceStatus();
-    setFace('thinking');
-    renderTranscript();
-    startThinkingIndicator();
-
-    const reply = await queryHelio(text)
-        .catch(() => ({ text: "Uh oh! I lost my intelligence, could you ask me later?", failed: true }));
-    stopThinkingIndicator();
-    if (!alive()) return;
-
-    const answer = (reply && reply.text) || 'Done.';
-    if (reply && reply.failed) playErrorSound();
-
-    notifyHelioState('output_generated', 'speaking', answer, '');
-    appendHistory('agent', answer);
-    outputTranscript = answer;
-    renderTranscript();
-
-    agentState = 'speaking';
-    setVoiceStatus();
-    setFace('speaking');
-    renderTranscript();
-    await speakText(answer);
-    if (!alive()) return;
-    resumeListening();
-}
-
-window.toggleHistory = function () {
-    const el = document.getElementById('modal-history-column'); if (el) el.classList.toggle('show');
-};
-window.closeHistory = function () {
-    const el = document.getElementById('modal-history-column'); if (el) el.classList.remove('show');
-};
-
-// =====================================================================
-//  HELIO BRAIN
-// =====================================================================
-let helioBackendDownUntil = 0;
-let helioSocket = null;
-let helioSocketConnectPromise = null;
-let helioPendingRequest = null;
-
-function closeHelioSocket(reason) {
-    const socket = helioSocket;
-    helioSocket = null;
-    helioSocketConnectPromise = null;
-    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, reason || 'closed');
-}
-
-function connectHelioSocket() {
-    if (typeof WebSocket === 'undefined') return Promise.reject(new Error('WebSocket is unavailable.'));
-    if (helioSocket && helioSocket.readyState === WebSocket.OPEN) return Promise.resolve(helioSocket);
-    if (helioSocketConnectPromise) return helioSocketConnectPromise;
-
-    helioSocketConnectPromise = new Promise((resolve, reject) => {
-        let settled = false;
-        const socket = new WebSocket(HELIO_WS_URL);
-        helioSocket = socket;
-        const timeout = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try { socket.close(); } catch (_) {}
-            reject(new Error('Helio WebSocket connection timed out.'));
-        }, HELIO_TIMEOUT_MS);
-
-        socket.onopen = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            resolve(socket);
-        };
-        socket.onmessage = (event) => {
-            let data;
-            try { data = JSON.parse(event.data); } catch (_) { return; }
-            if (data.conversation_id) currentCallId = data.conversation_id;
-            if (data.type === 'final' && helioPendingRequest) {
-                const request = helioPendingRequest;
-                helioPendingRequest = null;
-                clearTimeout(request.timer);
-                request.resolve({ text: data.output || data.message || '', source: 'websocket' });
-            } else if (data.type === 'error' && helioPendingRequest) {
-                const request = helioPendingRequest;
-                helioPendingRequest = null;
-                clearTimeout(request.timer);
-                request.reject(new Error(data.message || 'Helio agent error.'));
-            }
-        };
-        socket.onerror = () => {
-            if (!settled) {
-                settled = true;
-                clearTimeout(timeout);
-                reject(new Error('Helio WebSocket connection failed.'));
-            }
-        };
-        socket.onclose = () => {
-            clearTimeout(timeout);
-            if (helioSocket === socket) {
-                helioSocket = null;
-                helioSocketConnectPromise = null;
-            }
-            if (helioPendingRequest) {
-                const request = helioPendingRequest;
-                helioPendingRequest = null;
-                clearTimeout(request.timer);
-                request.reject(new Error('Helio WebSocket disconnected.'));
-            }
-        };
-    }).finally(() => {
-        helioSocketConnectPromise = null;
-    });
-    return helioSocketConnectPromise;
-}
-
-async function queryHelio(text) {
-    if (Date.now() < helioBackendDownUntil) return localFallback(text);
-    try {
-        const socket = await connectHelioSocket();
-        if (helioPendingRequest) throw new Error('Helio is already processing a request.');
-
-        const result = new Promise((resolve, reject) => {
-            const request = { resolve, reject, timer: null };
-            request.timer = setTimeout(() => {
-                if (helioPendingRequest === request) {
-                    helioPendingRequest = null;
-                    reject(new Error('Helio response timed out.'));
-                }
-            }, HELIO_TIMEOUT_MS);
-            helioPendingRequest = request;
-        });
-        socket.send(JSON.stringify({ type: 'message', message: text }));
-        return await result;
-    } catch (error) {
-        helioBackendDownUntil = Date.now() + 60000;
-        closeHelioSocket('request failed');
-        return localFallback(text);
-    }
-}
-
-const UNRECOGNIZED_LOCAL_REPLY = "Sorry, I didn't understand that command. Try: go to x 2 y 3, follow waypoints, abort, save map, or status.";
-async function localFallback(text) {
-    const reply = await localAssistant(text);
-    if (reply && reply.text === UNRECOGNIZED_LOCAL_REPLY) {
-        return { text: 'Uh oh! I lost my intelligence, could you ask me later?', failed: true };
-    }
-    return reply;
-}
-
-function numbersIn(s) {
-    const t = s.replace(/\bminus\b/g, '-').replace(/\bpoint\b/g, '.');
-    return (t.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
-}
-
-function statusReport() {
-    const parts = [];
-    parts.push('Mode: ' + (currentMode ? modeLabel(currentMode) : 'unknown') + '.');
-    parts.push('Navigation is ' + navStatus.toLowerCase() + '.');
-    if (robot) parts.push('The rover is at x ' + robot.x.toFixed(2) + ', y ' + robot.y.toFixed(2) + ' meters, heading ' +
-        (((robot.yaw * 180 / Math.PI) + 360) % 360).toFixed(0) + ' degrees.');
-    else parts.push('I have no position yet.');
-    if (odom) parts.push('Speed is ' + odom.speed.toFixed(2) + ' meters per second.');
-    if (distanceRemaining !== null && (navStatus === 'Navigating' || navStatus === 'Planning'))
-        parts.push(distanceRemaining.toFixed(1) + ' meters to go.');
-    parts.push(rosConnected ? 'ROS bridge is connected.' : 'ROS bridge is offline.');
-    return parts.join(' ');
-}
-
-async function localAssistant(raw) {
-    const t = ' ' + raw.toLowerCase().replace(/[^\w\s.\-,]/g, ' ').replace(/\s+/g, ' ').trim() + ' ';
-    const has = (re) => re.test(t);
-    const nums = numbersIn(t);
-
-    // --- Emergency: return to home ---
-    if (has(/\b(return|go|come|drive|head)\b.*\b(home|origin|start|base)\b/) ||
-        has(/\bhome\b.*\b(position|pose|point)\b/)) {
-        await emergencyReturnHome();
-        return { text: 'Returning to home at map origin.' };
-    }
-
-    if (has(/\b(abort|cancel|halt|emergency|stop)\b/) && !has(/\bstop (the )?joystick\b/)) {
-        await sendAbort();
-        return { text: 'Mission aborted.' };
-    }
-    if (has(/\b(enable|activate|turn on|start)\b.*\bjoystick\b/)) {
-        if (!joyEnabled) window.toggleJoyEnable();
-        return { text: 'Joystick enabled.' };
-    }
-    if (has(/\b(disable|deactivate|turn off|stop)\b.*\bjoystick\b/)) {
-        if (joyEnabled) window.toggleJoyEnable();
-        return { text: 'Joystick disabled.' };
-    }
-    if (has(/\bfollow\b.*\bwaypoints?\b|\b(start|run|execute)\b.*\bwaypoints?\b/)) {
-        if (!waypointsData.length) return { text: 'There are no waypoints yet. Click the map to add some first.' };
-        await sendWaypoints();
-        return { text: 'Following ' + waypointsData.length + ' waypoints.' };
-    }
-    if (has(/\b(clear|remove|delete|reset)\b.*\b(markers?|waypoints?|targets?)\b/)) {
-        clearMarkers();
-        return { text: 'Markers cleared.' };
-    }
-    if (has(/\b(set|update)\b.*\b(initial|start)\b.*\b(pose|position)\b/)) {
-        if (nums.length >= 2) { updateUIInputs(nums[0], nums[1], nums[2] || 0); singleTarget = { x: nums[0], y: nums[1], yaw: nums[2] || 0 }; }
-        await sendInitialPose();
-        return { text: 'Initial pose sent.' };
-    }
-    if (has(/\b(navigate|go|drive|move|head|take me)\b/) && nums.length >= 2) {
-        const yaw = nums[2] || 0;
-        updateUIInputs(nums[0], nums[1], yaw);
-        singleTarget = { x: nums[0], y: nums[1], yaw };
-        needsDraw = true;
-        await sendGoalPose();
-        return { text: 'Navigating to x ' + nums[0] + ', y ' + nums[1] + '.' };
-    }
-    if (has(/\b(navigate|go|drive)\b.*\b(target|marker|selected|there)\b/)) {
-        if (!singleTarget) return { text: 'No target is selected. Click the map to choose one.' };
-        await sendGoalPose();
-        return { text: 'Navigating to the selected target.' };
-    }
-    if (has(/\bsave\b.*\bmap\b/)) {
-        openSaveMapDialog();
-        return { text: 'Opening the save map dialog. Enter a name to confirm.' };
-    }
-    if (has(/\b(load|upload)\b.*\bmap\b/)) {
-        openLoadMapDialog();
-        return { text: 'Opening the load map dialog. Choose your files to upload.' };
-    }
-    if (has(/\b(view|open|show)\b.*\bmap\b/)) {
-        openMapViewer();
-        return { text: 'Opening the map viewer.' };
-    }
-    if (has(/\b(fit|reset|center|centre)\b.*\b(map|view)\b/)) {
-        fitMapView();
-        return { text: 'Map fitted to the panel.' };
-    }
-    if (has(/\bfollow\b.*\b(rover|robot|me)\b/)) {
-        toggleFollow();
-        return { text: follow ? 'Following the rover.' : 'Stopped following the rover.' };
-    }
-    if (has(/\b(dark|night)\b.*\b(mode|theme)\b/)) { if (document.body.classList.contains('light-theme')) toggleTheme(); return { text: 'Dark theme on.' }; }
-    if (has(/\b(light|day)\b.*\b(mode|theme)\b/)) { if (!document.body.classList.contains('light-theme')) toggleTheme(); return { text: 'Light theme on.' }; }
-    if (has(/\b(status|where|position|location|report|speed|how far|distance)\b/)) return { text: statusReport() };
-    if (has(/\b(hello|hi|hey|namaste)\b/)) return { text: 'Hello! I am Helio. Tell me where to drive the rover.' };
-    if (has(/\b(help|what can you do)\b/)) {
-        return { text: 'You can say: go to x 2 y 3, follow waypoints, abort, return home, save map, load map, view map, enable joystick, or status.' };
-    }
-    return { text: UNRECOGNIZED_LOCAL_REPLY };
-}
-
-// =====================================================================
-//  Wake word
-// =====================================================================
-const WAKE_OPTIONS = { robot: ['robot'], jojo: ['jojo'] };
-const WAKE_PATTERNS = {
-    robot: /\b(he?y|hi|okay|ok)?\s*(robot|robo|robut|ro-?bot|rowbot|robort|robaut|row\s*bot|robotic|rob it|rob ot|robo t|robert)\b/i,
-    jojo: /\b(he?y|hi|okay|ok)?\s*(jojo|jo-?jo|jo\s*jo|joe\s*joe|joejoe|jojoe|jojou|joj-?o|jhojho|jyojyo|jojoy|dojo)\b/i
-};
-let wakeWord = 'robot';
-let wakeEnabled = true;
-let wakeBlocked = false;
-try {
-    const savedWord = localStorage.getItem('milusions-wake-word');
-    const savedState = localStorage.getItem('milusions-wake');
-    if (savedWord && WAKE_OPTIONS[savedWord]) {
-        wakeWord = savedWord;
-        wakeLanguageOverride = savedWord === 'jojo' ? 'hi' : 'en';
-        selectedLanguage = wakeLanguageOverride;
-    }
-    if (savedState === 'off') wakeEnabled = false;
-} catch (_) {}
-
-function renderWakeMenu() {
-    const menu = document.getElementById('wake-menu');
-    if (!menu) return;
-    menu.innerHTML = '<div class="wm-title">Wake word</div>';
-    Object.keys(WAKE_OPTIONS).forEach((key) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = key === wakeWord ? 'sel' : '';
-        button.textContent = key === 'jojo' ? 'Hey JoJo' : 'Hey Robot';
-        button.onclick = () => {
-            wakeWord = key;
-            wakeLanguageOverride = key === 'jojo' ? 'hi' : 'en';
-            selectedLanguage = wakeLanguageOverride;
-            try { localStorage.setItem('milusions-wake-word', key); } catch (_) {}
-            updateWakeBtn(); closeWakeMenu();
-        };
-        menu.appendChild(button);
-    });
-    menu.appendChild(document.createElement('hr'));
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'wm-toggle' + (wakeEnabled ? ' on' : '');
-    toggle.dataset.state = wakeEnabled ? 'ON' : 'OFF';
-    toggle.textContent = 'Listen for wake word';
-    toggle.onclick = toggleWake;
-    menu.appendChild(toggle);
-}
-function updateWakeBtn() {
-    const btn = document.getElementById('wake-btn');
-    const label = document.getElementById('wake-label');
-    if (label) label.textContent = wakeWord === 'jojo' ? 'Hey JoJo' : 'Hey Robot';
-    const on = wakeEnabled && !wakeBlocked;
-    if (btn) {
-        btn.classList.toggle('on', on); btn.classList.toggle('off', !on);
-        btn.title = wakeBlocked ? 'Microphone blocked - wake word unavailable' : 'Wake word settings';
-    }
-    renderWakeMenu();
-    syncEngine();
-}
-function toggleWakeMenu(event) {
-    if (event) event.stopPropagation();
-    const menu = document.getElementById('wake-menu');
-    const btn = document.getElementById('wake-btn');
-    if (!menu) return;
-    menu.hidden = !menu.hidden;
-    if (btn) btn.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
-}
-function closeWakeMenu() {
-    const menu = document.getElementById('wake-menu');
-    const btn = document.getElementById('wake-btn');
-    if (menu) menu.hidden = true;
-    if (btn) btn.setAttribute('aria-expanded', 'false');
-}
-function toggleWake() {
-    wakeEnabled = !wakeEnabled;
-    try { localStorage.setItem('milusions-wake', wakeEnabled ? 'on' : 'off'); } catch (_) {}
-    updateWakeBtn();
-}
-document.addEventListener('click', (event) => { if (!event.target.closest('.wake-menu-wrap')) closeWakeMenu(); });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeWakeMenu(); });
-
-(function init() {
-    let saved = null;
-    try { saved = localStorage.getItem('milusions-theme'); } catch (e) {}
-    applyTheme(saved !== 'dark');
-
-    setupPanelUtilities();
-    const followButton = document.getElementById('follow-btn');
-    if (followButton) followButton.classList.toggle('on', follow);
-    loadMapNames();
-
-    updateWaypointsUI();
-    setClickMode('single');
-    initMapPanelExtras();
-    renderMode();
-
-    initROSBridge();
-
-    fetchMode().then(m => { if (m && !pending) setCurrentMode(m); });
-    setInterval(async () => {
-        if (pending) return;
-        const m = await fetchMode();
-        if (m) setCurrentMode(m);
-    }, 8000);
-
-    bindRecognition();
-    updateWakeBtn();
-    syncEngine();
-    PeekController.start();
-
-    const typeInput = document.getElementById('helio-type-input');
-    const typeSend = document.getElementById('helio-type-send');
-    const sendTyped = () => {
-        if (!typeInput) return;
-        submitTypedCommand(typeInput.value);
-        typeInput.value = '';
-    };
-    if (typeSend) typeSend.addEventListener('click', sendTyped);
-    if (typeInput) typeInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); sendTyped(); }
-    });
-
-    requestAnimationFrame(frame);
+// ===== grids =====
+// Foxglove / RViz "costmap" palette:
+// 0 transparent, 1-98 blue -> red gradient, 99 inscribed = cyan, 100 lethal = purple
+const COST_LUT = (() => {
+  const t = [];
+  for (let v = 0; v <= 100; v++) {
+    if (v === 0) t.push([0, 0, 0, 0]);
+    else if (v < 99) { const k = (v - 1) / 97; t.push([Math.round(255 * k), 0, Math.round(255 * (1 - k)), 175]); }
+    else if (v === 99) t.push([0, 255, 255, 225]);
+    else t.push([255, 0, 255, 235]);
+  }
+  return t;
 })();
+const CLEAR = [0, 0, 0, 0];
 
+function cellColor(v, kind) {
+  if (kind === 'slam') return v >= 50 ? [20, 20, 20, 255] : v >= 0 ? [240, 240, 240, 255] : CLEAR;
+  return v >= 0 && v <= 100 ? COST_LUT[v] : CLEAR;
+}
 
-// =====================================================================
-//  ROVER STATE MACHINE  —  header controls
-//
-//  Backend contract (adjust endpoints in SYSTEM_STATE below if needed):
-//    GET  /system/state                      -> { state, detail, since, ros_up }
-//    POST /system/state    { state: "<x>" }  -> { ok, state }   (409 on bad transition)
-//    POST /system/shutdown                   -> { ok }
-//
-//  Only these two states are user-selectable from the header switch:
-//      sman_active  <->  paused
-//
-//  All other states are owned by the backend and merely mirrored here.
-// =====================================================================
-
-const SYSTEM_STATE = {
-    pollMs: 1500,
-    requestTimeoutMs: 6000,
-
-    // REST paths — change here only.
-    paths: {
-        getState: '/system/state',
-        setState: '/system/state',
-        shutdown: '/system/shutdown'
-    },
-
-    // Only these two are user-selectable.
-    USER_STATES: ['sman_active', 'paused'],
-
-    // These states get a pulsing indicator (transient / in progress).
-    PULSING: ['boot', 'preflight', 'warmup'],
-
-    LABELS: {
-        boot:         'BOOT',
-        preflight:    'PREFLIGHT',
-        idle:         'IDLE',
-        warmup:       'WARM-UP',
-        sman_active:  'SMAN ACTIVE',
-        paused:       'PAUSED',
-        fault:        'FAULT',
-        session_end:  'SESSION END',
-        unknown:      'UNKNOWN'
+function gridToLayer(msg, kind) {
+  const w = msg.info.width, h = msg.info.height;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  const img = cx.createImageData(w, h);
+  const d = msg.data;
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const [r, g, b, a] = cellColor(d[j * w + i], kind), o = ((h - 1 - j) * w + i) * 4;
+      img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = a;
     }
+  }
+  cx.putImageData(img, 0, 0);
+  return {
+    kind, w, h, res: msg.info.resolution,
+    ox: msg.info.origin.position.x, oy: msg.info.origin.position.y,
+    frame: (msg.header.frame_id || 'map').replace(/^\//, ''), img: c,
+    outline: kind === 'local' ? 'rgba(0,119,255,0.9)' : null,   // dashed box marks the local costmap window
+  };
+}
+
+// Nav2 publishes the full costmap rarely and sends changes on <costmap>_updates (partial patches)
+function applyUpdate(layer, u) {
+  if (!layer || u.x < 0 || u.y < 0 || u.x + u.width > layer.w || u.y + u.height > layer.h) return;
+  const cx = layer.img.getContext('2d');
+  const img = cx.createImageData(u.width, u.height);
+  for (let j = 0; j < u.height; j++) {
+    for (let i = 0; i < u.width; i++) {
+      const [r, g, b, a] = cellColor(u.data[j * u.width + i], layer.kind), o = ((u.height - 1 - j) * u.width + i) * 4;
+      img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = a;
+    }
+  }
+  cx.putImageData(img, u.x, layer.h - u.y - u.height);
+  dirty();
+}
+
+// ===== draw =====
+let pending = false;
+function dirty() { if (!pending) { pending = true; requestAnimationFrame(draw); } }
+
+function arrowHead(x, y, a, s, color) {
+  ctx.fillStyle = color; ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(a - 0.45), y - s * Math.sin(a - 0.45));
+  ctx.lineTo(x - s * Math.cos(a + 0.45), y - s * Math.sin(a + 0.45));
+  ctx.closePath(); ctx.fill();
+}
+
+function drawLayer(g) {
+  const p = getPose(g.frame);
+  if (!p) return;
+  const x = g.ox * view.s, y = -(g.oy + g.h * g.res) * view.s, w = g.w * g.res * view.s, h = g.h * g.res * view.s;
+  ctx.save();
+  ctx.translate(view.x + p.x * view.s, view.y - p.y * view.s);
+  ctx.rotate(-p.yaw);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(g.img, x, y, w, h);
+  if (g.outline) { ctx.strokeStyle = g.outline; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.strokeRect(x, y, w, h); }
+  ctx.restore();
+}
+
+const toMap = (p, x, y) => {
+  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+  return [p.x + x * c - y * s, p.y + x * s + y * c];
+};
+const toScreen = (mx, my) => [view.x + mx * view.s, view.y - my * view.s];
+
+function draw() {
+  pending = false;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (layers.slam && show.slam) drawLayer(layers.slam);
+  if (layers.global && show.global) drawLayer(layers.global);
+  if (layers.local && show.local) drawLayer(layers.local);
+
+  if (plan && show.path) {
+    const p = getPose(plan.frame);
+    if (p) {
+      ctx.strokeStyle = rgb(COLORS.path); ctx.lineWidth = 3; ctx.beginPath();
+      plan.pts.forEach((q, i) => {
+        const [x, y] = toScreen(...toMap(p, q[0], q[1]));
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.stroke();
+    }
+  }
+
+  if (scan && show.scan) {
+    const p = getPose(scan.frame) || getPose(BASE_FRAME);
+    if (p) {
+      ctx.fillStyle = rgb(COLORS.scan);
+      scan.ranges.forEach((r, i) => {
+        if (!isFinite(r) || r <= 0) return;
+        const a = scan.angle_min + i * scan.inc;
+        const [x, y] = toScreen(...toMap(p, r * Math.cos(a), r * Math.sin(a)));
+        ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+      });
+    }
+  }
+
+  const rp = getPose(BASE_FRAME);
+  if (rp) {
+    const [x, y] = toScreen(rp.x, rp.y);
+    const ang = -rp.yaw;                               // canvas angle of heading
+    const v = vel.v || 0, w = vel.w || 0, cfg = getCfg();
+
+    if (Math.abs(w) > 0.005) {                         // rotational velocity: orange arc + arrowhead
+      const sweep = Math.max(-1, Math.min(1, w / cfg.maxAng)) * Math.PI * 0.75;
+      const end = ang - sweep;
+      ctx.strokeStyle = '#ff9500'; ctx.lineWidth = 3; ctx.beginPath();
+      ctx.arc(x, y, 15, ang, end, sweep > 0); ctx.stroke();
+      arrowHead(x + 15 * Math.cos(end), y + 15 * Math.sin(end), sweep > 0 ? end - Math.PI / 2 : end + Math.PI / 2, 9, '#ff9500');
+    }
+    if (Math.abs(v) > 0.005) {                         // forward velocity: green arrow + head
+      const len = Math.max(-1, Math.min(1, v / cfg.maxLin)) * 50;
+      const tx = x + Math.cos(ang) * len, ty = y + Math.sin(ang) * len;
+      ctx.strokeStyle = '#00a03c'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(tx, ty); ctx.stroke();
+      arrowHead(tx, ty, len >= 0 ? ang : ang + Math.PI, 11, '#00a03c');
+    }
+    ctx.fillStyle = '#0077ff'; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#0077ff'; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(ang) * 16, y + Math.sin(ang) * 16); ctx.stroke();
+
+    const label = vel.v === null ? 'v --  \u03C9 --'
+      : `v ${v.toFixed(2)} m/s  \u03C9 ${w.toFixed(2)} rad/s`;
+    ctx.font = '12px sans-serif'; ctx.textBaseline = 'top';
+    ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.strokeText(label, x + 12, y + 12);
+    ctx.fillStyle = '#1a2634'; ctx.fillText(label, x + 12, y + 12);
+  }
+
+  if (goalDrag) {                                      // goal pose preview
+    const g = goalDrag, dx = g.x1 - g.x0, dy = g.y1 - g.y0;
+    ctx.strokeStyle = '#0077ff'; ctx.fillStyle = '#0077ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(g.x0, g.y0, 6, 0, 7); ctx.fill();
+    if (Math.hypot(dx, dy) > 12) {
+      const a2 = Math.atan2(dy, dx);
+      ctx.beginPath(); ctx.moveTo(g.x0, g.y0); ctx.lineTo(g.x1, g.y1); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(g.x1, g.y1);
+      ctx.lineTo(g.x1 - 12 * Math.cos(a2 - 0.4), g.y1 - 12 * Math.sin(a2 - 0.4));
+      ctx.lineTo(g.x1 - 12 * Math.cos(a2 + 0.4), g.y1 - 12 * Math.sin(a2 + 0.4));
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+// ===== log =====
+function addLog(text, level = 'INFO', source = 'Dashboard') {
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+  const row = document.createElement('div');
+  row.className = 'row ' + level.toLowerCase();
+  const meta = document.createElement('div'); meta.className = 'meta';
+  const t = document.createElement('time'); t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+  const l = document.createElement('span'); l.className = 'lvl'; l.textContent = level;
+  const s = document.createElement('b'); s.textContent = source;
+  meta.append(t, l, s);
+  const m = document.createElement('div'); m.className = 'msg'; m.textContent = text;
+  row.append(meta, m);
+  logEl.appendChild(row);
+  while (logEl.childElementCount > 300) logEl.firstElementChild.remove();
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+}
+// "global_costmap.global_costmap" -> "Global costmap"
+function prettyName(n) {
+  const s = [...new Set(String(n).split(/[./]/).filter(Boolean))].join(' / ').replace(/_/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+const LEVELS = { 10: 'DEBUG', 20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'FATAL' };
+
+// ===== subscriptions =====
+const NAV = { 1: 'ACCEPTED', 2: 'NAVIGATING', 3: 'CANCELING', 4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED' };
+
+function subscribeAll() {
+  topic('/tf', 'tf2_msgs/msg/TFMessage', { throttle_rate: 50 }).subscribe(onTF);
+  topic('/tf_static', 'tf2_msgs/msg/TFMessage').subscribe(onTF);
+
+  topic(T.map, 'nav_msgs/msg/OccupancyGrid', { throttle_rate: 1000 })
+    .subscribe(m => { layers.slam = gridToLayer(m, 'slam'); dirty(); });
+  topic(T.global, 'nav_msgs/msg/OccupancyGrid')
+    .subscribe(m => { layers.global = gridToLayer(m, 'global'); dirty(); });
+  topic(T.local, 'nav_msgs/msg/OccupancyGrid')
+    .subscribe(m => { layers.local = gridToLayer(m, 'local'); dirty(); });
+  topic(T.globalUpdates, 'map_msgs/msg/OccupancyGridUpdate').subscribe(u => applyUpdate(layers.global, u));
+  topic(T.localUpdates, 'map_msgs/msg/OccupancyGridUpdate').subscribe(u => applyUpdate(layers.local, u));
+
+  topic(T.scan, 'sensor_msgs/msg/LaserScan', { throttle_rate: 100 }).subscribe(m => {
+    scan = { frame: m.header.frame_id.replace(/^\//, ''), angle_min: m.angle_min, inc: m.angle_increment, ranges: m.ranges };
+    dirty();
+  });
+  topic(T.plan, 'nav_msgs/msg/Path', { throttle_rate: 200 }).subscribe(m => {
+    plan = { frame: m.header.frame_id.replace(/^\//, ''), pts: m.poses.map(p => [p.pose.position.x, p.pose.position.y]) };
+    dirty();
+  });
+
+  topic(T.odom, 'nav_msgs/msg/Odometry', { throttle_rate: 100 }).subscribe(m => {
+    vel.v = m.twist.twist.linear.x; vel.w = m.twist.twist.angular.z; dirty();
+  });
+
+  topic(T.navStatus, 'action_msgs/msg/GoalStatusArray').subscribe(m => {
+    const s = m.status_list;
+    navEl.textContent = 'Nav: ' + (s.length ? NAV[s[s.length - 1].status] || '?' : 'IDLE');
+  });
+
+  topic('/rosout', 'rcl_interfaces/msg/Log', { queue_length: 100 }).subscribe(m => {
+    if (!NAVMAP_RE.test(m.name) && !NAVMAP_RE.test(m.msg)) return;
+    addLog(String(m.msg).replace(/\s+/g, ' ').trim(), LEVELS[m.level] || 'INFO', prettyName(m.name));
+  });
+}
+
+// ===== toolbar =====
+document.getElementById('btn-save').onclick = () => {
+  const name = prompt('Map name:', 'map');
+  if (!name) return;
+  new ROSLIB.Service({ ros, name: T.saveMap, serviceType: 'slam_toolbox/srv/SaveMap' })
+    .callService({ name: { data: name } },
+      r => alert(r.result === 0 ? 'Map saved on rover: ' + name : 'Save failed, code ' + r.result),
+      err => alert('Save failed: ' + err));
 };
 
-const SysState = {
-    current: 'unknown',
-    since: 0,
-    rosUp: true,
-    lastPollOk: 0,
-    busy: false,
-    pollTimer: null,
-    shutdownInFlight: false,
-    dom: {
-        chip: null,
-        label: null,
-        sw: null,
-        segs: [],
-        shutdown: null
-    }
+const helioQ = document.getElementById('helio-q');
+const helioReply = document.getElementById('helio-reply');
+
+// prefer an en-GB female voice; which voices exist depends on the device / browser
+function pickVoice() {
+  const gb = speechSynthesis.getVoices().filter(v => /^en[-_]GB$/i.test(v.lang));
+  const femaleNames = /female|hazel|serena|kate|libby|sonia|susan|fiona|martha|stephanie|amy|emma|abbi|bella|holly|maisie|mia|olivia|hollie/i;
+  const maleNames = /\bmale\b|daniel|arthur|george|ryan|thomas|oliver|alfie|elliot|noah|ollie/i;
+  return gb.find(v => /female/i.test(v.name)) || gb.find(v => femaleNames.test(v.name))
+    || gb.find(v => !maleNames.test(v.name)) || gb[0] || null;
+}
+
+function speak(text) {
+  if (SPEAK_ON_ROVER && ros) topic('/robot_operator/speak_device', 'std_msgs/msg/String').publish({ data: text });
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'en-GB';
+  const v = pickVoice(); if (v) u.voice = v;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+async function askHelio() {
+  const text = helioQ.value.trim();
+  if (!text) return;
+  helioReply.textContent = 'Thinking\u2026';
+  try {
+    const r = await fetch(`http://${IP}:${BACKEND_PORT}/helio/command`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, lang: 'en' }),
+      signal: AbortSignal.timeout(5000),
+    }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+    const reply = r.reply || r.text || '(no reply)';
+    helioReply.textContent = reply;
+    speak(reply);
+  } catch (e) {
+    helioReply.textContent = 'Helio is not connected.';
+    speak('Helio is not connected.');
+  }
+}
+document.getElementById('helio-ask').onclick = askHelio;
+helioQ.addEventListener('keydown', e => { if (e.key === 'Enter') askHelio(); });
+
+document.getElementById('btn-cancel').onclick = () => {
+  new ROSLIB.Service({ ros, name: T.navCancel, serviceType: 'action_msgs/srv/CancelGoal' })
+    .callService({}, () => addLog('Cancel requested'), err => alert('Cancel failed: ' + err));
+  haltJoystick();
 };
 
-// ----- DOM cache -----
-function sysStateCacheDom() {
-    SysState.dom.chip     = document.getElementById('rover-state-chip');
-    SysState.dom.label    = document.getElementById('rover-state-label');
-    SysState.dom.sw       = document.getElementById('sman-switch');
-    SysState.dom.segs     = SysState.dom.sw
-        ? Array.from(SysState.dom.sw.querySelectorAll('.sman-seg'))
-        : [];
-    SysState.dom.shutdown = document.getElementById('shutdown-btn');
+document.getElementById('btn-clear').onclick = () => {
+  [['global', T.clearGlobal], ['local', T.clearLocal]].forEach(([label, name]) =>
+    new ROSLIB.Service({ ros, name, serviceType: 'nav2_msgs/srv/ClearEntireCostmap' })
+      .callService({}, () => addLog(`Cleared the ${label} costmap obstacle layers`, 'INFO', 'Dashboard'),
+        err => alert(`Clear ${label} costmap failed: ` + err)));
+};
+
+// full screen for the map and every panel (falls back to a fixed overlay if the API is unavailable)
+function toggleFull(el) {
+  const on = document.fullscreenElement === el || el.classList.contains('maximized');
+  if (on) {
+    if (document.fullscreenElement) document.exitFullscreen();
+    el.classList.remove('maximized');
+    return;
+  }
+  if (el.requestFullscreen) el.requestFullscreen().catch(() => el.classList.add('maximized'));
+  else el.classList.add('maximized');
 }
+document.getElementById('btn-full').onclick = () => toggleFull(document.getElementById('map-wrap'));
+document.querySelectorAll('.fs').forEach(b => b.onclick = () => toggleFull(b.closest('.panel')));
 
-// ----- Helpers -----
-function sysStateIsUserSelectable() {
-    return SYSTEM_STATE.USER_STATES.includes(SysState.current);
+// ===== joystick: ramped cmd_vel, limits read live from the panel fields =====
+const JOY_DT = 0.05;                       // 20 Hz control loop
+const joyTarget = { l: 0, a: 0 };          // -1..1
+const joyCur = { l: 0, a: 0 };             // m/s, rad/s
+let joyTimer = null, cmdPub = null;
+
+function drive(lin, ang) {
+  if (!cmdPub) cmdPub = topic(T.cmdVel, 'geometry_msgs/msg/Twist');
+  cmdPub.publish({ linear: { x: lin, y: 0, z: 0 }, angular: { x: 0, y: 0, z: ang } });
 }
-
-// ----- Rendering -----
-function renderSystemState() {
-    const { chip, label, sw, segs, shutdown } = SysState.dom;
-    const state = SysState.current;
-    const text  = SYSTEM_STATE.LABELS[state] || state;
-
-    if (chip) {
-        chip.dataset.state = state;
-        chip.classList.toggle('pulse', SYSTEM_STATE.PULSING.includes(state));
-        chip.title = 'Rover state: ' + text +
-            (SysState.since ? '  ·  since ' + new Date(SysState.since).toLocaleTimeString() : '');
-    }
-    if (label) label.textContent = text;
-
-    if (sw) {
-        const selectable = sysStateIsUserSelectable() && SysState.rosUp;
-        sw.setAttribute('aria-disabled', selectable ? 'false' : 'true');
-        sw.title = selectable
-            ? 'Switch between SMAN Active and Paused'
-            : 'Locked — SMAN control unlocks once the rover reaches SMAN or Paused.';
-        sw.classList.toggle('busy', SysState.busy);
-
-        segs.forEach(seg => {
-            const segState = seg.dataset.target;
-            const isActive = segState === state;
-            seg.classList.toggle('active', isActive);
-            seg.disabled = !selectable || isActive || SysState.busy;
-        });
-    }
-
-    if (shutdown) {
-        shutdown.disabled = SysState.shutdownInFlight;
-        shutdown.classList.toggle('loading', SysState.shutdownInFlight);
-    }
+const approach = (cur, target, rate) => {
+  const d = target - cur, m = rate * JOY_DT;
+  return Math.abs(d) <= m ? target : cur + Math.sign(d) * m;
+};
+function joyTick() {
+  const c = getCfg();
+  joyCur.l = approach(joyCur.l, joyTarget.l * c.maxLin, c.accel);
+  joyCur.a = approach(joyCur.a, joyTarget.a * c.maxAng, c.angAccel);
+  joyCur.l = Math.max(-c.maxLin, Math.min(c.maxLin, joyCur.l));
+  joyCur.a = Math.max(-c.maxAng, Math.min(c.maxAng, joyCur.a));
+  drive(joyCur.l, joyCur.a);
+  if (!joyTarget.l && !joyTarget.a && !joyCur.l && !joyCur.a) { clearInterval(joyTimer); joyTimer = null; }
 }
-
-// ----- Applying a server snapshot -----
-function applySystemSnapshot(data) {
-    if (!data || typeof data !== 'object') return;
-    const next = String(data.state || 'unknown').toLowerCase();
-    const changed = next !== SysState.current;
-
-    SysState.current = next;
-    SysState.since   = Number(data.since) || SysState.since || 0;
-    SysState.rosUp   = data.ros_up !== false;
-    SysState.lastPollOk = Date.now();
-
-    if (changed && next === 'fault' && SysState.dom.chip) {
-        SysState.dom.chip.classList.remove('shake');
-        void SysState.dom.chip.offsetWidth;
-        SysState.dom.chip.classList.add('shake');
-    }
-
-    renderSystemState();
+function haltJoystick() {
+  joyTarget.l = joyTarget.a = 0; joyCur.l = joyCur.a = 0;
+  clearInterval(joyTimer); joyTimer = null;
+  if (ros) drive(0, 0);
 }
+document.querySelectorAll('#joy button').forEach(b => {
+  const [l, a] = b.dataset.v.split(',').map(Number);
+  b.addEventListener('pointerdown', () => {
+    if (!l && !a) { haltJoystick(); return; }                 // Stop = immediate
+    joyTarget.l = l || (a ? Math.min(1, TURN_LINEAR / getCfg().maxLin) : 0);
+    joyTarget.a = a;
+    if (!joyTimer) joyTimer = setInterval(joyTick, JOY_DT * 1000);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+    b.addEventListener(ev, () => { joyTarget.l = 0; joyTarget.a = 0; }));   // release = ramp down
+});
+window.addEventListener('blur', haltJoystick);
 
-// ----- Fetch current state -----
-async function fetchSystemState() {
-    try {
-        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.getState, { cache: 'no-store' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        applySystemSnapshot(data);
-    } catch (_) {
-        // Leave the previous state on screen; the "ROS Disconnected" badge
-        // already tells the user we've lost the bridge.
-    }
-}
-
-// ----- User requests a SMAN transition -----
-async function requestSmanState(target) {
-    if (!SYSTEM_STATE.USER_STATES.includes(target)) return;
-    if (!sysStateIsUserSelectable()) return;
-    if (SysState.busy) return;
-    if (SysState.current === target) return;
-
-    SysState.busy = true;
-    renderSystemState();
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SYSTEM_STATE.requestTimeoutMs);
-
-    try {
-        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.setState, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ state: target }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-        const raw = await res.text();
-        let data = {};
-        try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
-
-        if (res.status === 409) {
-            notify('WARNING', 'Rover refused the switch: ' + (data.detail || 'state transition not allowed.'));
-            await fetchSystemState();
-        } else if (!res.ok) {
-            throw new Error(data.detail || ('HTTP ' + res.status));
-        } else {
-            applySystemSnapshot(data.state ? data : { state: target, ros_up: SysState.rosUp });
-            notify('INFO', 'Requested ' + (SYSTEM_STATE.LABELS[target] || target) + '.');
-            // Confirm with the backend on the next tick.
-            setTimeout(fetchSystemState, 400);
-        }
-    } catch (err) {
-        clearTimeout(timeoutId);
-        const msg = err.name === 'AbortError' ? 'Rover did not respond in time.' : err.message;
-        notify('ERROR', 'SMAN switch failed: ' + msg);
-        await fetchSystemState();
-    } finally {
-        SysState.busy = false;
-        renderSystemState();
-    }
-}
-
-// ----- Shutdown dialog -----
-function openShutdownDialog() {
-    if (SysState.shutdownInFlight) return;
-    const dlg = document.getElementById('shutdown-dialog');
-    const status = document.getElementById('shutdown-status');
-    if (!dlg) return;
-    if (status) status.textContent = '';
-    dlg.hidden = false;
-}
-
-function closeShutdownDialog() {
-    const dlg = document.getElementById('shutdown-dialog');
-    if (dlg) dlg.hidden = true;
-}
-
-async function confirmShutdown() {
-    if (SysState.shutdownInFlight) return;
-    const status = document.getElementById('shutdown-status');
-    const confirmBtn = document.getElementById('shutdown-confirm');
-
-    SysState.shutdownInFlight = true;
-    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.classList.add('loading'); }
-    if (status) status.textContent = 'Sending shutdown request…';
-    renderSystemState();
-
-    try {
-        const res = await fetch(REST_API_BASE + SYSTEM_STATE.paths.shutdown, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const raw = await res.text();
-        let data = {};
-        try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
-        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
-
-        if (status) status.textContent = 'Shutdown acknowledged. Waiting for ROS to go down…';
-        notify('WARNING', 'ROS shutdown requested. The rover is powering down.');
-
-        // Give the backend a moment, then show the overlay.
-        setTimeout(() => {
-            closeShutdownDialog();
-            const overlay = document.getElementById('ros-down-overlay');
-            if (overlay) overlay.hidden = false;
-        }, 1200);
-    } catch (err) {
-        if (status) status.textContent = 'Shutdown failed: ' + err.message;
-        notify('ERROR', 'Shutdown failed: ' + err.message);
-        SysState.shutdownInFlight = false;
-        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.classList.remove('loading'); }
-        renderSystemState();
-    }
-}
-
-// ----- Polling loop -----
-function startSystemStatePolling() {
-    if (SysState.pollTimer) clearInterval(SysState.pollTimer);
-    fetchSystemState();
-    SysState.pollTimer = setInterval(fetchSystemState, SYSTEM_STATE.pollMs);
-}
-
-// ----- Public API (needed by inline onclick handlers) -----
-window.requestSmanState     = requestSmanState;
-window.openShutdownDialog   = openShutdownDialog;
-window.closeShutdownDialog  = closeShutdownDialog;
-window.confirmShutdown      = confirmShutdown;
-
-// ----- Boot -----
-(function initRoverStateMachine() {
-    sysStateCacheDom();
-    renderSystemState();
-    // Wait one tick so the rest of the app has a chance to wire up first.
-    setTimeout(startSystemStatePolling, 600);
-
-    // Re-poll immediately whenever the ROS bridge reconnects.
-    // (rosConnected is a global from the main script; poll on a soft timer too.)
-    setInterval(() => {
-        if (typeof rosConnected !== 'undefined' && rosConnected) {
-            // Cheap: only re-poll if the last successful poll is stale.
-            if (Date.now() - SysState.lastPollOk > SYSTEM_STATE.pollMs * 2) {
-                fetchSystemState();
-            }
-        }
-    }, 3000);
-})();
-
-// =====================================================================
-//  MOBILE VOICE GATE
-//  Speech recognition (STT) and text-to-speech (TTS) are disabled on
-//  mobile / touch-primary devices and on small viewports. This block
-//  must run BEFORE the init() IIFE below to neutralise any voice code
-//  that already ran, and to install the guard used by openVoiceModal,
-//  activateHelio, bindRecognition, syncEngine, and speakText.
-// =====================================================================
-
-(function installMobileVoiceGate() {
-
-    // ----- 1. Mobile detection (3 layers, catches desktop-mode phones) -----
-    const IS_MOBILE_DEVICE = (function detectMobile() {
-        try {
-            if (window.matchMedia && window.matchMedia('(max-width: 640px)').matches) return true;
-            const coarse  = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
-            const noHover = window.matchMedia && window.matchMedia('(hover: none)').matches;
-            if (coarse && noHover) return true;
-            if (/Android|iPhone|iPad|iPod|Mobile|Windows Phone|webOS|BlackBerry/i.test(navigator.userAgent || '')) {
-                return true;
-            }
-        } catch (_) {}
-        return false;
-    })();
-
-    const TTS_SUPPORTED = (!IS_MOBILE_DEVICE) && ('speechSynthesis' in window);
-
-    // Expose for the rest of the app.
-    window.IS_MOBILE_DEVICE = IS_MOBILE_DEVICE;
-    window.TTS_SUPPORTED    = TTS_SUPPORTED;
-
-    if (!IS_MOBILE_DEVICE) return;   // Nothing else to do on desktop.
-
-    // ----- 2. Null out the recognition implementation -----
-    // The global `const SpeechRecognitionImpl` in the main script cannot
-    // be reassigned, so we shadow the module-level variable it feeds:
-    // recognition gets aborted and never restarted.
-    try { if (typeof recognition !== 'undefined' && recognition) recognition.abort(); } catch (_) {}
-
-    // Kill any in-flight timers that could restart the engine.
-    try { if (typeof clearVoiceTimers === 'function') clearVoiceTimers(); } catch (_) {}
-    try { if (typeof stopThinkingIndicator === 'function') stopThinkingIndicator(); } catch (_) {}
-    try { if (typeof MicLevels !== 'undefined' && MicLevels.stop) MicLevels.stop(); } catch (_) {}
-    try { if (typeof TalkAnimator !== 'undefined' && TalkAnimator.stop) TalkAnimator.stop(); } catch (_) {}
-    try { if (typeof EyeMotion !== 'undefined' && EyeMotion.stop) EyeMotion.stop(); } catch (_) {}
-    try { if (typeof PeekController !== 'undefined' && PeekController.stop) PeekController.stop(); } catch (_) {}
-    try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch (_) {}
-
-    // ----- 3. Override the speech entry points -----
-    // speakText: no-op on mobile.
-    window.speakText = function () { return Promise.resolve(); };
-
-    // openVoiceModal: shows a clear notice instead of starting voice.
-    window.openVoiceModal = function () {
-        if (typeof notify === 'function') {
-            notify('INFO', 'Helio voice mode is disabled on mobile. Open the dashboard on a desktop to use voice.');
-        }
-    };
-
-    // activateHelio: hard-refuse.
-    window.activateHelio = function () { /* disabled on mobile */ };
-
-    // ----- 4. Disable the wake-word button and neutralise wake handling -----
-    function disableWakeBtn() {
-        const wakeBtn = document.getElementById('wake-btn');
-        if (wakeBtn) {
-            wakeBtn.disabled = true;
-            wakeBtn.classList.add('disabled');
-            wakeBtn.title = 'Voice features are disabled on mobile.';
-            wakeBtn.setAttribute('aria-disabled', 'true');
-        }
-        // Also close the wake menu if it somehow opened.
-        const menu = document.getElementById('wake-menu');
-        if (menu) menu.hidden = true;
-    }
-
-    // toggleWakeMenu / toggleWake become inert.
-    window.toggleWakeMenu = function (event) {
-        if (event && event.stopPropagation) event.stopPropagation();
-        disableWakeBtn();
-    };
-    window.toggleWake = function () { /* disabled on mobile */ };
-
-    // ----- 5. Reflect the disabled state in the Ask Helio card -----
-    function markHelioCardDisabled() {
-        const panel = document.getElementById('waergv-panel');
-        const note  = document.getElementById('waergv-mobile-note');
-        if (note) note.hidden = false;
-        if (panel) {
-            panel.classList.add('mobile-disabled');
-            panel.title = 'Helio voice mode is disabled on mobile. Open on desktop to use voice.';
-        }
-    }
-
-    // ----- 6. Apply once the DOM is ready (script runs after DOM in this file) -----
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () {
-            disableWakeBtn();
-            markHelioCardDisabled();
-        });
-    } else {
-        disableWakeBtn();
-        markHelioCardDisabled();
-    }
-
-    // Re-apply after the main init() has run (main init also touches the
-    // wake button at startup). A short timeout is enough.
-    setTimeout(function () {
-        disableWakeBtn();
-        markHelioCardDisabled();
-    }, 800);
-
+// ===== start =====
+(async () => {
+  if (!(await login())) { document.body.textContent = 'Not signed in. Reload to try again.'; return; }
+  navEl.textContent = 'Nav: IDLE';
+  if (innerWidth < 640) document.getElementById('legend').open = false;
+  if ('speechSynthesis' in window) speechSynthesis.getVoices();   // warm up the voice list
+  subscribeAll();
+  dirty();
 })();
