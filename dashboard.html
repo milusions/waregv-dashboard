@@ -8,9 +8,13 @@
 </head>
 <body>
 
-<header id="brand"><h1><span class="company">3AM Robotics</span> <span class="product">WareGV</span></h1></header>
+<header id="brand">
+  <h1><span class="company">3AM Robotics</span> <span class="product">WareGV</span></h1>
+  <button id="btn-app-full" class="fs" title="Full screen (whole site)" aria-label="Full screen (whole site)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+</header>
 
 <div id="main">
+  <div id="left">
   <div id="map-wrap">
     <div id="stage">
       <canvas id="map" width="1280" height="720"></canvas>
@@ -49,6 +53,24 @@
 
       <span id="nav-state" class="overlay">Nav: --</span>
     </div>
+  </div>
+
+  <div id="cams">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Color camera</h2>
+        <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+      </div>
+      <div class="cam-box"><img id="cam-color" alt="Color camera"><span class="cam-msg" hidden>Camera not connected</span></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Depth camera</h2>
+        <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+      </div>
+      <div class="cam-box"><img id="cam-depth" alt="Depth camera"><span class="cam-msg" hidden>Camera not connected</span></div>
+    </section>
+  </div>
   </div>
 
   <aside id="side">
