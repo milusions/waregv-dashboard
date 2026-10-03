@@ -116,15 +116,49 @@ button.active, button:active { background: var(--primary); color: #fff; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .panel h2 { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 
-#joy {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  grid-template-areas: ". up ." "left stop right" ". down .";
-  gap: 6px;
-  max-width: 210px;
-  margin: 0 auto 12px;
+/* ---------- single draggable joystick ---------- */
+.joy-box {
+  position: relative;
+  width: min(210px, 60vw);
+  aspect-ratio: 1 / 1;
+  margin: 4px auto 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  overflow: hidden;
 }
-#joy button { min-height: 44px; padding: 0; user-select: none; -webkit-user-select: none; touch-action: none; }
+.joy-box.dragging { cursor: grabbing; }
+
+.joy-cross {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat,
+    linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.joy-knob {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 38%;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--primary);
+  box-shadow: 0 2px 8px rgba(0, 40, 80, 0.18);
+  transform: translate(-50%, -50%);
+  will-change: transform;
+  pointer-events: none;
+}
+/* spring-back only on release, never during drag */
+.joy-box:not(.dragging) .joy-knob { transition: transform 0.12s ease-out; }
+
+.panel:fullscreen .joy-box, .panel.maximized .joy-box { max-width: 380px; width: 70vw; }
 
 #joy-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 #joy-settings label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
@@ -172,7 +206,6 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 .panel:fullscreen #log, .panel.maximized #log { flex: 1; height: auto; }
 .panel:fullscreen #log .msg, .panel.maximized #log .msg { font-size: 15px; }
 .panel:fullscreen #joy, .panel.maximized #joy { max-width: 380px; }
-.panel:fullscreen #joy button, .panel.maximized #joy button { min-height: 72px; font-size: 20px; }
 .panel:fullscreen #helio-reply, .panel.maximized #helio-reply { font-size: 18px; }
 
 /* ---------- responsive ---------- */

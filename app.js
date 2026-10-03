@@ -21,7 +21,6 @@ const T = {
   clearLocal:  '/local_costmap/clear_entirely_local_costmap',
 };
 const SPEAK_ON_ROVER = false; // also send Helio replies to the rover speaker topic
-const TURN_LINEAR = 0;    // forward speed added while turning left/right (0 = spin in place)
 const BASE_FRAME = 'base_link';
 
 // joystick defaults; the fields in the Joystick panel override these live
@@ -530,9 +529,9 @@ function startCameras() {
   });
 }
 
-// ===== joystick: ramped cmd_vel, limits read live from the panel fields =====
-const JOY_DT = 0.05;                       // 20 Hz control loop
-const joyTarget = { l: 0, a: 0 };          // -1..1
+// ===== joystick: single draggable square pad, returns to center on release =====
+const JOY_DT = 0.05;                       // 20 Hz cmd_vel loop
+const joyTarget = { l: 0, a: 0 };          // -1..1 (l = forward, a = yaw)
 const joyCur = { l: 0, a: 0 };             // m/s, rad/s
 let joyTimer = null, cmdPub = null;
 
@@ -546,29 +545,58 @@ const approach = (cur, target, rate) => {
 };
 function joyTick() {
   const c = getCfg();
-  joyCur.l = approach(joyCur.l, joyTarget.l * c.maxLin, c.accel);
-  joyCur.a = approach(joyCur.a, joyTarget.a * c.maxAng, c.angAccel);
-  joyCur.l = Math.max(-c.maxLin, Math.min(c.maxLin, joyCur.l));
-  joyCur.a = Math.max(-c.maxAng, Math.min(c.maxAng, joyCur.a));
+  joyCur.l = Math.max(-c.maxLin, Math.min(c.maxLin, approach(joyCur.l, joyTarget.l * c.maxLin, c.accel)));
+  joyCur.a = Math.max(-c.maxAng, Math.min(c.maxAng, approach(joyCur.a, joyTarget.a * c.maxAng, c.angAccel)));
   drive(joyCur.l, joyCur.a);
   if (!joyTarget.l && !joyTarget.a && !joyCur.l && !joyCur.a) { clearInterval(joyTimer); joyTimer = null; }
 }
 function haltJoystick() {
   joyTarget.l = joyTarget.a = 0; joyCur.l = joyCur.a = 0;
   clearInterval(joyTimer); joyTimer = null;
+  const box = document.getElementById('joy');
+  if (box) { box.classList.remove('dragging'); box.querySelector('.joy-knob').style.transform = 'translate(-50%, -50%)'; }
   if (ros) drive(0, 0);
 }
-document.querySelectorAll('#joy button').forEach(b => {
-  const [l, a] = b.dataset.v.split(',').map(Number);
-  b.addEventListener('pointerdown', () => {
-    if (!l && !a) { haltJoystick(); return; }                 // Stop = immediate
-    joyTarget.l = l || (a ? Math.min(1, TURN_LINEAR / getCfg().maxLin) : 0);
-    joyTarget.a = a;
-    if (!joyTimer) joyTimer = setInterval(joyTick, JOY_DT * 1000);
-  });
-  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
-    b.addEventListener(ev, () => { joyTarget.l = 0; joyTarget.a = 0; }));   // release = ramp down
+
+const joyBox = document.getElementById('joy');
+const joyKnob = joyBox.querySelector('.joy-knob');
+let joyPtr = null;
+
+function joyMove(clientX, clientY) {
+  const r = joyBox.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  const maxR = r.width / 2 - joyKnob.offsetWidth / 2;   // stay inside the box
+  let dx = clientX - cx, dy = clientY - cy;
+  const d = Math.hypot(dx, dy);
+  if (d > maxR) { dx = dx / d * maxR; dy = dy / d * maxR; }
+  joyKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+  joyTarget.a = -(dx / maxR);       // right = clockwise (negative yaw)
+  joyTarget.l = -(dy / maxR);       // up    = forward
+  if (!joyTimer) joyTimer = setInterval(joyTick, JOY_DT * 1000);
+}
+
+joyBox.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  joyPtr = e.pointerId;
+  joyBox.setPointerCapture(joyPtr);
+  joyBox.classList.add('dragging');
+  joyMove(e.clientX, e.clientY);
 });
+joyBox.addEventListener('pointermove', e => {
+  if (e.pointerId !== joyPtr) return;
+  joyMove(e.clientX, e.clientY);
+});
+const joyEnd = e => {
+  if (e.pointerId !== joyPtr) return;
+  joyPtr = null;
+  joyBox.classList.remove('dragging');
+  joyKnob.style.transform = 'translate(-50%, -50%)';   // snap back to 0,0
+  joyTarget.l = 0; joyTarget.a = 0;                    // ramp down via joyTick
+};
+joyBox.addEventListener('pointerup', joyEnd);
+joyBox.addEventListener('pointercancel', joyEnd);
+joyBox.addEventListener('lostpointercapture', joyEnd);
+
 window.addEventListener('blur', haltJoystick);
 
 // ===== start =====

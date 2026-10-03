@@ -79,12 +79,9 @@
         <h2>Joystick</h2>
         <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
       </div>
-      <div id="joy">
-        <button data-v="1,0" style="grid-area:up">&#8593;</button>
-        <button data-v="0,1" style="grid-area:left">&#8592;</button>
-        <button data-v="0,0" style="grid-area:stop">Stop</button>
-        <button data-v="0,-1" style="grid-area:right">&#8594;</button>
-        <button data-v="-1,0" style="grid-area:down">&#8595;</button>
+      <div id="joy" class="joy-box" role="application" aria-label="Drive joystick">
+        <div class="joy-cross"></div>
+        <div class="joy-knob"></div>
       </div>
       <div id="joy-settings">
         <label>Max linear <small>m/s</small><input id="set-lin" type="number" value="0.3" min="0.01" step="0.01"></label>
