@@ -148,7 +148,7 @@ button.active, button:active { background: var(--primary); color: #fff; }
   width: 38%;
   aspect-ratio: 1 / 1;
   border-radius: 50%;
-  background: var(--surface);
+  background:#0077ff;
   border: 2px solid var(--primary);
   box-shadow: 0 2px 8px rgba(0, 40, 80, 0.18);
   transform: translate(-50%, -50%);
