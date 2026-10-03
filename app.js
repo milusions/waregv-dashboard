@@ -1,6 +1,8 @@
 // ===== config =====
 const ROSBRIDGE_PORT = 9090;
-const BACKEND_PORT = 8000;               // only used for Ask Helio
+const BACKEND_PORT = 8000;
+const CAM_PORT = 5000;                   // camera streamer (MJPEG)
+const CAMS = [['cam-color', '/video_feed'], ['cam-depth', '/depth_feed']];               // only used for Ask Helio
 const T = {
   map:    '/map',
   global: '/global_costmap/costmap',
@@ -509,7 +511,24 @@ function toggleFull(el) {
   else el.classList.add('maximized');
 }
 document.getElementById('btn-full').onclick = () => toggleFull(document.getElementById('map-wrap'));
-document.querySelectorAll('.fs').forEach(b => b.onclick = () => toggleFull(b.closest('.panel')));
+document.querySelectorAll('.panel .fs').forEach(b => b.onclick = () => toggleFull(b.closest('.panel')));
+document.getElementById('btn-app-full').onclick = () => {
+  if (!document.documentElement.requestFullscreen) { alert('Full screen is not supported on this browser.'); return; }
+  if (document.fullscreenElement === document.documentElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+};
+
+// camera panels: <img> pointed straight at the MJPEG streams, retries if the streamer is down
+function startCameras() {
+  CAMS.forEach(([id, path]) => {
+    const img = document.getElementById(id), msg = img.nextElementSibling;
+    const url = `http://${IP}:${CAM_PORT}${path}`;
+    const load = () => { img.src = url + '?t=' + Date.now(); };
+    img.onload = () => { msg.hidden = true; };
+    img.onerror = () => { msg.hidden = false; setTimeout(load, 3000); };
+    load();
+  });
+}
 
 // ===== joystick: ramped cmd_vel, limits read live from the panel fields =====
 const JOY_DT = 0.05;                       // 20 Hz control loop
@@ -559,5 +578,6 @@ window.addEventListener('blur', haltJoystick);
   if (innerWidth < 640) document.getElementById('legend').open = false;
   if ('speechSynthesis' in window) speechSynthesis.getVoices();   // warm up the voice list
   subscribeAll();
+  startCameras();
   dirty();
 })();
