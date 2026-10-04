@@ -291,6 +291,56 @@ function drawLayer(g) {
   ctx.restore();
 }
 
+// Draw a 1 m x 1 m grid aligned to the SLAM map's world frame.
+// Only drawn while the SLAM layer is visible so it matches the map's coordinate space.
+function drawGrid() {
+  if (!layers.slam || !show.slam) return;
+  const g = layers.slam;
+  const p = getPose(g.frame);
+  if (!p) return;
+
+  // Visible world bounds in the map frame, padded a bit so lines don't pop at edges.
+  const corners = [
+    [0, 0], [canvas.width, 0],
+    [canvas.width, canvas.height], [0, canvas.height],
+  ].map(([sx, sy]) => {
+    const wx = (sx - view.x) / view.s;
+    const wy = -(sy - view.y) / view.s;
+    // undo the map-frame pose to get coordinates in g.frame
+    const c = Math.cos(-p.yaw), s = Math.sin(-p.yaw);
+    const dx = wx - p.x, dy = wy - p.y;
+    return [dx * c - dy * s, dx * s + dy * c];
+  });
+
+  const minX = Math.floor(Math.min(...corners.map(c => c[0])) - 1);
+  const maxX = Math.ceil(Math.max(...corners.map(c => c[0])) + 1);
+  const minY = Math.floor(Math.min(...corners.map(c => c[1])) - 1);
+  const maxY = Math.ceil(Math.max(...corners.map(c => c[1])) + 1);
+
+  // Fade the grid out when zoomed too far out (lines become visual noise).
+  const alpha = Math.min(0.35, Math.max(0, (view.s - 6) / 40));
+  if (alpha <= 0) return;
+
+  ctx.save();
+  ctx.translate(view.x + p.x * view.s, view.y - p.y * view.s);
+  ctx.rotate(-p.yaw);
+  ctx.strokeStyle = `rgba(0, 40, 80, ${alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = minX; x <= maxX; x++) {
+    const sx = x * view.s, sy0 = -maxY * view.s, sy1 = -minY * view.s;
+    ctx.moveTo(sx, sy0);
+    ctx.lineTo(sx, sy1);
+  }
+  for (let y = minY; y <= maxY; y++) {
+    const sy = -y * view.s, sx0 = minX * view.s, sx1 = maxX * view.s;
+    ctx.moveTo(sx0, sy);
+    ctx.lineTo(sx1, sy);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 const toMap = (p, x, y) => {
   const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
   return [p.x + x * c - y * s, p.y + x * s + y * c];
@@ -303,6 +353,7 @@ function draw() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   if (layers.slam && show.slam) drawLayer(layers.slam);
+  drawGrid();
   if (layers.global && show.global) drawLayer(layers.global);
   if (layers.local && show.local) drawLayer(layers.local);
 
@@ -453,6 +504,17 @@ document.getElementById('btn-save').onclick = () => {
     .callService({ name: { data: name } },
       r => alert(r.result === 0 ? 'Map saved on rover: ' + name : 'Save failed, code ' + r.result),
       err => alert('Save failed: ' + err));
+};
+
+// return to home: publish a Nav2 goal at (0, 0, yaw 0) in the map frame
+document.getElementById('btn-home').onclick = () => {
+  if (!confirm('Navigate to home (x=0.00, y=0.00, heading 0\u00B0)?')) return;
+  setGoalMode(false);
+  topic(T.goal, 'geometry_msgs/msg/PoseStamped').publish({
+    header: { frame_id: 'map' },
+    pose: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
+  });
+  addLog('Goal sent: 0.00, 0.00, 0 deg (home)');
 };
 
 const helioQ = document.getElementById('helio-q');
