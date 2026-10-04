@@ -42,7 +42,10 @@ function connect(ip) {
     const r = new ROSLIB.Ros({ url: `ws://${ip}:${ROSBRIDGE_PORT}` });
     r.on('connection', () => resolve(r));
     r.on('error', () => reject());
-    r.on('close', () => { navEl.textContent = 'Nav: disconnected'; });
+    r.on('close', () => {
+      navEl.textContent = 'Nav: disconnected';
+      odomX.textContent = odomY.textContent = odomH.textContent = '--';
+    });
   });
 }
 
@@ -84,6 +87,9 @@ const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const logEl = document.getElementById('log');
 const navEl = document.getElementById('nav-state');
+const odomX = document.getElementById('odom-x');
+const odomY = document.getElementById('odom-y');
+const odomH = document.getElementById('odom-h');
 
 const COST_GRADIENT = 'linear-gradient(90deg, #0000ff, #7f007f, #ff0000)';
 document.querySelectorAll('.sw').forEach(el => {
@@ -95,6 +101,7 @@ document.querySelectorAll('[data-layer]').forEach(cb =>
 
 // ===== TF =====
 const yawOf = q => Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+const normDeg = a => ((a * 180 / Math.PI) % 360 + 360) % 360;
 
 function getPose(frame, depth = 0) {
   if (!frame || frame === 'map') return { x: 0, y: 0, yaw: 0 };
@@ -418,7 +425,13 @@ function subscribeAll() {
   });
 
   topic(T.odom, 'nav_msgs/msg/Odometry', { throttle_rate: 100 }).subscribe(m => {
-    vel.v = m.twist.twist.linear.x; vel.w = m.twist.twist.angular.z; dirty();
+    vel.v = m.twist.twist.linear.x; vel.w = m.twist.twist.angular.z;
+    const p = m.pose.pose.position;
+    const yaw = yawOf(m.pose.pose.orientation);
+    odomX.textContent = p.x.toFixed(2) + ' m';
+    odomY.textContent = p.y.toFixed(2) + ' m';
+    odomH.textContent = normDeg(yaw).toFixed(1) + '\u00B0';
+    dirty();
   });
 
   topic(T.navStatus, 'action_msgs/msg/GoalStatusArray').subscribe(m => {

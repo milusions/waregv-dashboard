@@ -169,6 +169,18 @@ button.active, button:active { background: var(--primary); color: #fff; }
 }
 input:focus { outline: none; border-color: var(--primary); background: #fff; }
 
+/* ---------- odometry readout ---------- */
+#odom-readout { display: flex; flex-direction: column; gap: 6px; }
+.odom-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 6px 10px; border-radius: 8px; background: var(--bg);
+  border: 1px solid var(--border);
+}
+.odom-label { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.odom-val { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px; color: var(--text); }
+.panel:fullscreen #odom-readout, .panel.maximized #odom-readout { gap: 10px; }
+.panel:fullscreen .odom-val, .panel.maximized .odom-val { font-size: 22px; }
+
 #helio-row { display: flex; gap: 6px; }
 #helio-q {
   flex: 1; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text);
