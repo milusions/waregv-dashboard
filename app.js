@@ -2,7 +2,7 @@
 const ROSBRIDGE_PORT = 9090;
 const BACKEND_PORT = 8000;
 const CAM_PORT = 5000;                   // camera streamer (MJPEG)
-const CAMS = [['cam-color', '/video_feed'], ['cam-depth', '/depth_feed']];               // only used for Ask Helio
+const CAMS = [['cam-color', '/video_feed'], ['cam-depth', '/depth_feed']];
 const T = {
   map:    '/map',
   global: '/global_costmap/costmap',
@@ -19,11 +19,13 @@ const T = {
   localUpdates:  '/local_costmap/costmap_updates',
   clearGlobal: '/global_costmap/clear_entirely_global_costmap',
   clearLocal:  '/local_costmap/clear_entirely_local_costmap',
+  arm: '/motor_arm',                     // Bool: true = armed, false = disarmed
+  headlight: '/headlight_mode',          // String: OFF | ON | BLINK_2HZ | BLINK_5HZ | PULSE_3 | PULSE_5
 };
-const SPEAK_ON_ROVER = false; // also send Helio replies to the rover speaker topic
+const SPEAK_ON_ROVER = false;
 const BASE_FRAME = 'base_link';
 
-// joystick defaults; the fields in the Joystick panel override these live
+// joystick defaults
 const DEF = { maxLin: 0.3, maxAng: 0.21, accel: 0.5, angAccel: 0.5 };
 const field = (id, d) => { const v = parseFloat(document.getElementById(id).value); return v > 0 ? v : d; };
 const getCfg = () => ({
@@ -31,10 +33,31 @@ const getCfg = () => ({
   accel: field('set-acc', DEF.accel), angAccel: field('set-angacc', DEF.angAccel),
 });
 
-// log only navigation / mapping related lines from /rosout
-const NAVMAP_RE = /nav|planner|controller|bt_|behavior|costmap|amcl|slam|map|waypoint|smoother|recovery|lifecycle|goal|path|locali/i;
+const NAVMAP_RE = /nav|planner|controller|bt_|behavior|costmap|amcl|slam|map|waypoint|smoother|recovery|lifecycle|goal|path|locali|motor|arm|headlight|warn/i;
 
-// ===== login (native prompts) + rosbridge connect =====
+// ===== password <-> IP =====
+// Password format: each IPv4 octet zero-padded to 3 digits, concatenated.
+// Example: IP 10.182.52.97  ->  password "010182052097"
+function decodeIp(pass) {
+  const s = String(pass || '').trim();
+  if (!/^\d{12}$/.test(s)) return null;
+  const octets = [s.slice(0, 3), s.slice(3, 6), s.slice(6, 9), s.slice(9, 12)];
+  const nums = octets.map(o => parseInt(o, 10));
+  if (nums.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return nums.join('.');
+}
+
+// Accept either a 12-digit password ("010182052097") or a normal dotted IP ("10.182.52.97")
+function parseIpInput(input) {
+  const s = String(input || '').trim();
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+    const ok = s.split('.').every(o => { const n = +o; return n >= 0 && n <= 255; });
+    return ok ? s : null;
+  }
+  return decodeIp(s);
+}
+
+// ===== login (password only) + rosbridge connect =====
 let ros = null, IP = '';
 
 function connect(ip) {
@@ -45,24 +68,35 @@ function connect(ip) {
     r.on('close', () => {
       navEl.textContent = 'Nav: disconnected';
       odomX.textContent = odomY.textContent = odomH.textContent = '--';
+      setArmed(false, { silent: true, publish: false });
     });
   });
 }
 
 async function login() {
+  // remembered password from last successful login (stored locally)
+  let remembered = localStorage.getItem('pass') || '';
   while (true) {
-    const user = prompt('Username:', 'waregv');
-    if (user === null) return false;
-    const pass = prompt('Password (rover IP):', localStorage.getItem('ip') || '');
+    const pass = prompt('Password (12-digit rover code, e.g. 010182052097):', remembered);
     if (pass === null) return false;
-    if (user.trim().toLowerCase() !== 'waregv') { alert('Wrong username.'); continue; }
+    const trimmed = pass.trim();
+    if (!trimmed) { alert('Please enter the password.'); continue; }
+
+    const ip = parseIpInput(trimmed);
+    if (!ip) {
+      alert('Invalid password. Expected 12 digits (e.g. 010182052097) or a dotted IP.');
+      continue;
+    }
+
     try {
-      ros = await connect(pass.trim());
-      IP = pass.trim();
-      localStorage.setItem('ip', IP);
+      ros = await connect(ip);
+      IP = ip;
+      localStorage.setItem('pass', trimmed);
       return true;
     } catch (e) {
-      alert('rosbridge did not respond at ' + pass.trim() + ':' + ROSBRIDGE_PORT);
+      alert('rosbridge did not respond at ' + ip + ':' + ROSBRIDGE_PORT);
+      // keep remembered so the user can correct a single digit
+      remembered = trimmed;
     }
   }
 }
@@ -77,11 +111,11 @@ const COLORS = {
 };
 const rgb = c => `rgb(${c.join(',')})`;
 const show = { slam: true, global: true, local: true, scan: true, path: true };
-const layers = { slam: null, global: null, local: null };   // {w,h,res,ox,oy,frame,img}
-let scan = null;                                            // {frame, angle_min, inc, ranges}
-let plan = null;                                            // {frame, pts}
-const vel = { v: null, w: null };                          // from /odom
-const tfs = {};                                             // child -> {parent,x,y,yaw}
+const layers = { slam: null, global: null, local: null };
+let scan = null;
+let plan = null;
+const vel = { v: null, w: null };
+const tfs = {};
 
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
@@ -91,6 +125,20 @@ const odomX = document.getElementById('odom-x');
 const odomY = document.getElementById('odom-y');
 const odomH = document.getElementById('odom-h');
 
+// arm UI refs + publisher
+const armBtn = document.getElementById('btn-arm');
+const armStateEl = document.getElementById('arm-state');
+let armPub = null;
+let armed = false;
+
+// warn-light UI refs + publisher
+const hlBtns = [...document.querySelectorAll('.hl-btn')];
+const hlStateEl = document.getElementById('hl-state');
+const hlPanelStateEl = document.getElementById('hl-panel-state');
+let hlPub = null;
+const HL_MODES = ['OFF', 'ON', 'BLINK_2HZ', 'BLINK_5HZ', 'PULSE_3', 'PULSE_5'];
+let headlightMode = 'OFF';
+
 const COST_GRADIENT = 'linear-gradient(90deg, #0000ff, #7f007f, #ff0000)';
 document.querySelectorAll('.sw').forEach(el => {
   const k = el.dataset.color;
@@ -98,6 +146,51 @@ document.querySelectorAll('.sw').forEach(el => {
 });
 document.querySelectorAll('[data-layer]').forEach(cb =>
   cb.addEventListener('change', () => { show[cb.dataset.layer] = cb.checked; dirty(); }));
+
+// ===== arm / disarm =====
+function armTopic() {
+  if (!armPub) armPub = topic(T.arm, 'std_msgs/msg/Bool');
+  return armPub;
+}
+
+function setArmed(on, { publish = true, silent = false } = {}) {
+  armed = !!on;
+  armBtn.setAttribute('aria-pressed', armed ? 'true' : 'false');
+  armBtn.setAttribute('aria-label', armed ? 'Disarm motors' : 'Arm motors');
+  armStateEl.textContent = armed ? 'Armed' : 'Disarmed';
+  armStateEl.classList.toggle('on', armed);
+  if (publish && ros) armTopic().publish({ data: armed });
+  if (!silent) addLog(armed ? 'Motors armed (5 s delay before motion)' : 'Motors disarmed',
+                      armed ? 'WARN' : 'INFO', 'Dashboard');
+  if (!armed) haltJoystick();
+}
+
+armBtn.addEventListener('click', () => setArmed(!armed));
+
+// ===== warn light =====
+function hlTopic() {
+  if (!hlPub) hlPub = topic(T.headlight, 'std_msgs/msg/String');
+  return hlPub;
+}
+
+function setHeadlight(mode, { publish = true, silent = false } = {}) {
+  if (!HL_MODES.includes(mode)) return;
+  headlightMode = mode;
+  hlBtns.forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  if (hlStateEl) hlStateEl.textContent = mode;
+  if (hlPanelStateEl) hlPanelStateEl.innerHTML = 'Current: <b>' + mode + '</b>';
+  if (publish && ros) hlTopic().publish({ data: mode });
+  if (!silent) addLog('Warn light mode: ' + mode, 'INFO', 'Dashboard');
+}
+
+hlBtns.forEach(b => b.addEventListener('click', () => {
+  const next = (b.dataset.mode === headlightMode && headlightMode !== 'OFF') ? 'OFF' : b.dataset.mode;
+  setHeadlight(next);
+}));
 
 // ===== TF =====
 const yawOf = q => Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
@@ -149,7 +242,7 @@ canvas.addEventListener('pointermove', e => {
   if (!pointers.has(e.pointerId)) return;
   const p = pos(e);
   pointers.set(e.pointerId, p);
-  if (pinch && pointers.size === 2) {                 // two fingers: pinch zoom + pan
+  if (pinch && pointers.size === 2) {
     const n = pinchState(), k = n.d / pinch.d;
     view.x = n.cx - (pinch.cx - view.x) * k;
     view.y = n.cy - (pinch.cy - view.y) * k;
@@ -182,7 +275,6 @@ document.getElementById('btn-fit').onclick = () => {
   view = { s: 60, x: canvas.width / 2, y: canvas.height / 2 }; dirty();
 };
 
-// "Set goal" button toggles goal mode; next click on the map sends a Nav2 goal
 const goalBtn = document.getElementById('btn-goal');
 function setGoalMode(on) {
   goalMode = on; goalDrag = null;
@@ -195,7 +287,6 @@ window.addEventListener('keydown', e => {
   if (e.key === 'Escape') { setGoalMode(false); document.querySelectorAll('.maximized').forEach(el => el.classList.remove('maximized')); }
 });
 
-// press = position, drag = heading, release = send (short drag keeps heading 0)
 function sendGoal(g) {
   setGoalMode(false);
   const x = (g.x0 - view.x) / view.s, y = -(g.y0 - view.y) / view.s;
@@ -211,8 +302,6 @@ function sendGoal(g) {
 }
 
 // ===== grids =====
-// Foxglove / RViz "costmap" palette:
-// 0 transparent, 1-98 blue -> red gradient, 99 inscribed = cyan, 100 lethal = purple
 const COST_LUT = (() => {
   const t = [];
   for (let v = 0; v <= 100; v++) {
@@ -247,11 +336,10 @@ function gridToLayer(msg, kind) {
     kind, w, h, res: msg.info.resolution,
     ox: msg.info.origin.position.x, oy: msg.info.origin.position.y,
     frame: (msg.header.frame_id || 'map').replace(/^\//, ''), img: c,
-    outline: kind === 'local' ? 'rgba(0,119,255,0.9)' : null,   // dashed box marks the local costmap window
+    outline: kind === 'local' ? 'rgba(0,119,255,0.9)' : null,
   };
 }
 
-// Nav2 publishes the full costmap rarely and sends changes on <costmap>_updates (partial patches)
 function applyUpdate(layer, u) {
   if (!layer || u.x < 0 || u.y < 0 || u.x + u.width > layer.w || u.y + u.height > layer.h) return;
   const cx = layer.img.getContext('2d');
@@ -291,22 +379,18 @@ function drawLayer(g) {
   ctx.restore();
 }
 
-// Draw a 1 m x 1 m grid aligned to the SLAM map's world frame.
-// Only drawn while the SLAM layer is visible so it matches the map's coordinate space.
 function drawGrid() {
   if (!layers.slam || !show.slam) return;
   const g = layers.slam;
   const p = getPose(g.frame);
   if (!p) return;
 
-  // Visible world bounds in the map frame, padded a bit so lines don't pop at edges.
   const corners = [
     [0, 0], [canvas.width, 0],
     [canvas.width, canvas.height], [0, canvas.height],
   ].map(([sx, sy]) => {
     const wx = (sx - view.x) / view.s;
     const wy = -(sy - view.y) / view.s;
-    // undo the map-frame pose to get coordinates in g.frame
     const c = Math.cos(-p.yaw), s = Math.sin(-p.yaw);
     const dx = wx - p.x, dy = wy - p.y;
     return [dx * c - dy * s, dx * s + dy * c];
@@ -317,7 +401,6 @@ function drawGrid() {
   const minY = Math.floor(Math.min(...corners.map(c => c[1])) - 1);
   const maxY = Math.ceil(Math.max(...corners.map(c => c[1])) + 1);
 
-  // Fade the grid out when zoomed too far out (lines become visual noise).
   const alpha = Math.min(0.35, Math.max(0, (view.s - 6) / 40));
   if (alpha <= 0) return;
 
@@ -385,17 +468,17 @@ function draw() {
   const rp = getPose(BASE_FRAME);
   if (rp) {
     const [x, y] = toScreen(rp.x, rp.y);
-    const ang = -rp.yaw;                               // canvas angle of heading
+    const ang = -rp.yaw;
     const v = vel.v || 0, w = vel.w || 0, cfg = getCfg();
 
-    if (Math.abs(w) > 0.005) {                         // rotational velocity: orange arc + arrowhead
+    if (Math.abs(w) > 0.005) {
       const sweep = Math.max(-1, Math.min(1, w / cfg.maxAng)) * Math.PI * 0.75;
       const end = ang - sweep;
       ctx.strokeStyle = '#ff9500'; ctx.lineWidth = 3; ctx.beginPath();
       ctx.arc(x, y, 15, ang, end, sweep > 0); ctx.stroke();
       arrowHead(x + 15 * Math.cos(end), y + 15 * Math.sin(end), sweep > 0 ? end - Math.PI / 2 : end + Math.PI / 2, 9, '#ff9500');
     }
-    if (Math.abs(v) > 0.005) {                         // forward velocity: green arrow + head
+    if (Math.abs(v) > 0.005) {
       const len = Math.max(-1, Math.min(1, v / cfg.maxLin)) * 50;
       const tx = x + Math.cos(ang) * len, ty = y + Math.sin(ang) * len;
       ctx.strokeStyle = '#00a03c'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(tx, ty); ctx.stroke();
@@ -412,7 +495,7 @@ function draw() {
     ctx.fillStyle = '#1a2634'; ctx.fillText(label, x + 12, y + 12);
   }
 
-  if (goalDrag) {                                      // goal pose preview
+  if (goalDrag) {
     const g = goalDrag, dx = g.x1 - g.x0, dy = g.y1 - g.y0;
     ctx.strokeStyle = '#0077ff'; ctx.fillStyle = '#0077ff'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(g.x0, g.y0, 6, 0, 7); ctx.fill();
@@ -443,7 +526,6 @@ function addLog(text, level = 'INFO', source = 'Dashboard') {
   while (logEl.childElementCount > 300) logEl.firstElementChild.remove();
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 }
-// "global_costmap.global_costmap" -> "Global costmap"
 function prettyName(n) {
   const s = [...new Set(String(n).split(/[./]/).filter(Boolean))].join(' / ').replace(/_/g, ' ');
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -506,7 +588,6 @@ document.getElementById('btn-save').onclick = () => {
       err => alert('Save failed: ' + err));
 };
 
-// return to home: publish a Nav2 goal at (0, 0, yaw 0) in the map frame
 document.getElementById('btn-home').onclick = () => {
   if (!confirm('Navigate to home (x=0.00, y=0.00, heading 0\u00B0)?')) return;
   setGoalMode(false);
@@ -520,7 +601,6 @@ document.getElementById('btn-home').onclick = () => {
 const helioQ = document.getElementById('helio-q');
 const helioReply = document.getElementById('helio-reply');
 
-// prefer an en-GB female voice; which voices exist depends on the device / browser
 function pickVoice() {
   const gb = speechSynthesis.getVoices().filter(v => /^en[-_]GB$/i.test(v.lang));
   const femaleNames = /female|hazel|serena|kate|libby|sonia|susan|fiona|martha|stephanie|amy|emma|abbi|bella|holly|maisie|mia|olivia|hollie/i;
@@ -573,7 +653,6 @@ document.getElementById('btn-clear').onclick = () => {
         err => alert(`Clear ${label} costmap failed: ` + err)));
 };
 
-// full screen for the map and every panel (falls back to a fixed overlay if the API is unavailable)
 function toggleFull(el) {
   const on = document.fullscreenElement === el || el.classList.contains('maximized');
   if (on) {
@@ -592,7 +671,6 @@ document.getElementById('btn-app-full').onclick = () => {
   else document.documentElement.requestFullscreen();
 };
 
-// camera panels: <img> pointed straight at the MJPEG streams, retries if the streamer is down
 function startCameras() {
   CAMS.forEach(([id, path]) => {
     const img = document.getElementById(id), msg = img.nextElementSibling;
@@ -604,10 +682,10 @@ function startCameras() {
   });
 }
 
-// ===== joystick: single draggable square pad, returns to center on release =====
-const JOY_DT = 0.05;                       // 20 Hz cmd_vel loop
-const joyTarget = { l: 0, a: 0 };          // -1..1 (l = forward, a = yaw)
-const joyCur = { l: 0, a: 0 };             // m/s, rad/s
+// ===== joystick =====
+const JOY_DT = 0.05;
+const joyTarget = { l: 0, a: 0 };
+const joyCur = { l: 0, a: 0 };
 let joyTimer = null, cmdPub = null;
 
 function drive(lin, ang) {
@@ -640,13 +718,13 @@ let joyPtr = null;
 function joyMove(clientX, clientY) {
   const r = joyBox.getBoundingClientRect();
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-  const maxR = r.width / 2 - joyKnob.offsetWidth / 2;   // stay inside the box
+  const maxR = r.width / 2 - joyKnob.offsetWidth / 2;
   let dx = clientX - cx, dy = clientY - cy;
   const d = Math.hypot(dx, dy);
   if (d > maxR) { dx = dx / d * maxR; dy = dy / d * maxR; }
   joyKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
-  joyTarget.a = -(dx / maxR);       // right = clockwise (negative yaw)
-  joyTarget.l = -(dy / maxR);       // up    = forward
+  joyTarget.a = -(dx / maxR);
+  joyTarget.l = -(dy / maxR);
   if (!joyTimer) joyTimer = setInterval(joyTick, JOY_DT * 1000);
 }
 
@@ -665,8 +743,8 @@ const joyEnd = e => {
   if (e.pointerId !== joyPtr) return;
   joyPtr = null;
   joyBox.classList.remove('dragging');
-  joyKnob.style.transform = 'translate(-50%, -50%)';   // snap back to 0,0
-  joyTarget.l = 0; joyTarget.a = 0;                    // ramp down via joyTick
+  joyKnob.style.transform = 'translate(-50%, -50%)';
+  joyTarget.l = 0; joyTarget.a = 0;
 };
 joyBox.addEventListener('pointerup', joyEnd);
 joyBox.addEventListener('pointercancel', joyEnd);
@@ -679,8 +757,11 @@ window.addEventListener('blur', haltJoystick);
   if (!(await login())) { document.body.textContent = 'Not signed in. Reload to try again.'; return; }
   navEl.textContent = 'Nav: IDLE';
   if (innerWidth < 640) document.getElementById('legend').open = false;
-  if ('speechSynthesis' in window) speechSynthesis.getVoices();   // warm up the voice list
+  if ('speechSynthesis' in window) speechSynthesis.getVoices();
+  setArmed(false, { publish: false, silent: true });
+  setHeadlight('OFF', { publish: false, silent: true });
   subscribeAll();
   startCameras();
   dirty();
+  addLog('Ready - IP ' + IP + '  arm: ' + T.arm + '  warn light: ' + T.headlight, 'INFO', 'Dashboard');
 })();

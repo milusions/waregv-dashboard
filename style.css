@@ -5,6 +5,8 @@
   --text: #1a2634;
   --muted: #5c6b7e;
   --border: #e2e8f0;
+  --arm: #ff004c;
+  --beam: #ffb400;
 }
 
 * { box-sizing: border-box; }
@@ -108,6 +110,93 @@ button.active, button:active { background: var(--primary); color: #fff; }
 .tool:hover::after, .tool:focus-visible::after { opacity: 1; }
 @media (hover: none) { .tool::after { display: none; } }
 
+/* ---------- warn-light toolbox (map overlay, top-center, wider than tall) ---------- */
+#headlight-bar {
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  height: auto;
+}
+#headlight-bar .hl-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-right: 4px;
+  border-right: 1px solid var(--border);
+  margin-right: 4px;
+}
+
+/* shared round icon button for warn-light modes */
+.hl-btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.hl-btn svg {
+  width: 20px; height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.hl-btn:hover { background: var(--bg); color: var(--text); }
+.hl-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.hl-btn.active {
+  background: var(--beam);
+  border-color: var(--beam);
+  color: #1a2634;
+  box-shadow: 0 0 0 4px rgba(255, 180, 0, 0.22);
+}
+
+/* tooltip for warn-light buttons (below, since bar is top-center) */
+.hl-btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--text);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.hl-btn:hover::after, .hl-btn:focus-visible::after { opacity: 1; }
+@media (hover: none) { .hl-btn::after { display: none; } }
+
+#headlight-bar .hl-state {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+  margin-left: 4px;
+  min-width: 54px;
+  text-align: center;
+}
+
 /* nav state: bottom-left */
 #nav-state { bottom: 10px; left: 10px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
 
@@ -181,6 +270,82 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 .panel:fullscreen #odom-readout, .panel.maximized #odom-readout { gap: 10px; }
 .panel:fullscreen .odom-val, .panel.maximized .odom-val { font-size: 22px; }
 
+/* ---------- arm / disarm panel ---------- */
+#arm-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 4px 0 6px; }
+
+.arm-btn {
+  width: 92px;
+  height: 92px;
+  padding: 0;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.arm-btn svg {
+  width: 42px; height: 42px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.arm-btn:hover { background: var(--bg); }
+.arm-btn:active { transform: scale(0.96); }
+.arm-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+
+/* armed state: solid #ff004c */
+.arm-btn[aria-pressed="true"] {
+  background: var(--arm);
+  border-color: var(--arm);
+  color: #fff;
+  box-shadow: 0 0 0 6px rgba(255, 0, 76, 0.18);
+}
+.arm-btn[aria-pressed="true"]:hover { background: #e6004a; }
+
+#arm-state {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#arm-state.on { color: var(--arm); }
+
+.panel:fullscreen .arm-btn, .panel.maximized .arm-btn { width: 150px; height: 150px; }
+.panel:fullscreen .arm-btn svg, .panel.maximized .arm-btn svg { width: 70px; height: 70px; }
+.panel:fullscreen #arm-state, .panel.maximized #arm-state { font-size: 18px; }
+
+/* ---------- warn-light side panel ---------- */
+#hl-panel-row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 0 4px;
+}
+#hl-panel-row .hl-btn { width: 48px; height: 48px; }
+#hl-panel-row .hl-btn svg { width: 24px; height: 24px; }
+#hl-panel-state {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 6px;
+}
+#hl-panel-state b { color: var(--text); }
+.panel:fullscreen #hl-panel-row, .panel.maximized #hl-panel-row { gap: 20px; }
+.panel:fullscreen #hl-panel-row .hl-btn, .panel.maximized #hl-panel-row .hl-btn { width: 80px; height: 80px; }
+.panel:fullscreen #hl-panel-row .hl-btn svg, .panel.maximized #hl-panel-row .hl-btn svg { width: 40px; height: 40px; }
+.panel:fullscreen #hl-panel-state, .panel.maximized #hl-panel-state { font-size: 18px; }
+
 #helio-row { display: flex; gap: 6px; }
 #helio-q {
   flex: 1; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text);
@@ -233,6 +398,12 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
   .tool { width: 34px; height: 34px; }
   #nav-state { bottom: 6px; left: 6px; font-size: 11px; }
   #log { height: 220px; }
+  /* warn-light bar reflows on small screens: shrink buttons, hide title */
+  #headlight-bar { top: 6px; padding: 4px 6px; gap: 4px; max-width: calc(100% - 100px); overflow-x: auto; }
+  #headlight-bar .hl-title { display: none; }
+  #headlight-bar .hl-btn { width: 30px; height: 30px; flex: 0 0 auto; }
+  #headlight-bar .hl-btn svg { width: 16px; height: 16px; }
+  #headlight-bar .hl-state { font-size: 10px; min-width: 42px; }
 }
 
 /* ---------- camera panels ---------- */

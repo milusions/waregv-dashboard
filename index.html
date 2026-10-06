@@ -29,6 +29,30 @@
         <label><input type="checkbox" data-layer="path" checked><span class="sw" data-color="path"></span>Nav2 path</label>
       </details>
 
+      <!-- warn-light toolbox: top-center, wider than tall, 6 icon buttons -->
+      <div id="headlight-bar" class="overlay" role="toolbar" aria-label="Warn light mode">
+        <span class="hl-title">Warn</span>
+        <button class="hl-btn" data-mode="OFF"       data-tip="Off"        aria-label="Warn light off">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 4l16 16"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="ON"        data-tip="Steady on"  aria-label="Warn light steady on">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="BLINK_2HZ" data-tip="Blink 2 Hz" aria-label="Warn light blink 2 hertz">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M6 9l-3-3M18 15l3 3"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="BLINK_5HZ" data-tip="Blink 5 Hz" aria-label="Warn light blink 5 hertz">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 8l-2-4M20 16l2 4M4 16l-2 4M20 8l2-4"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="PULSE_3"   data-tip="Pulse x3"   aria-label="Warn light pulse three times">
+          <svg viewBox="0 0 24 24"><path d="M3 14l3-3 3 3 4-5 4 5 4-5"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="PULSE_5"   data-tip="Pulse x5"   aria-label="Warn light pulse five times">
+          <svg viewBox="0 0 24 24"><path d="M2 14l2.5-3 2.5 3 2.5-4 2.5 4 2.5-4 2.5 4 2.5-3 2.5 3"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
+        </button>
+        <span id="hl-state" class="hl-state">OFF</span>
+      </div>
+
       <!-- toolbar with tooltips: top-right -->
       <div id="toolbar" class="overlay">
         <button id="btn-full" class="tool" data-tip="Full screen" aria-label="Full screen">
@@ -93,6 +117,54 @@
         <label>Angular accel <small>rad/s&sup2;</small><input id="set-angacc" type="number" value="0.5" min="0.01" step="0.1"></label>
       </div>
     </section>
+
+    <!-- ============ ARM / DISARM PANEL ============ -->
+    <section class="panel" id="panel-arm">
+      <div class="panel-head">
+        <h2>Motor arm</h2>
+        <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+      </div>
+      <div id="arm-wrap">
+        <button id="btn-arm" class="arm-btn" aria-pressed="false" aria-label="Arm motors">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v9"/>
+            <path d="M7.5 6.3a7 7 0 1 0 9 0"/>
+          </svg>
+        </button>
+        <div id="arm-state">Disarmed</div>
+      </div>
+    </section>
+    <!-- ============ /ARM ============ -->
+
+    <!-- ============ WARN-LIGHT PANEL ============ -->
+    <section class="panel" id="panel-headlight">
+      <div class="panel-head">
+        <h2>Warn light</h2>
+        <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+      </div>
+      <div id="hl-panel-row" role="toolbar" aria-label="Warn light mode">
+        <button class="hl-btn" data-mode="OFF"       data-tip="Off"        aria-label="Warn light off">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 4l16 16"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="ON"        data-tip="Steady on"  aria-label="Warn light steady on">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="BLINK_2HZ" data-tip="Blink 2 Hz" aria-label="Warn light blink 2 hertz">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M6 9l-3-3M18 15l3 3"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="BLINK_5HZ" data-tip="Blink 5 Hz" aria-label="Warn light blink 5 hertz">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 8l-2-4M20 16l2 4M4 16l-2 4M20 8l2-4"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="PULSE_3"   data-tip="Pulse x3"   aria-label="Warn light pulse three times">
+          <svg viewBox="0 0 24 24"><path d="M3 14l3-3 3 3 4-5 4 5 4-5"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
+        </button>
+        <button class="hl-btn" data-mode="PULSE_5"   data-tip="Pulse x5"   aria-label="Warn light pulse five times">
+          <svg viewBox="0 0 24 24"><path d="M2 14l2.5-3 2.5 3 2.5-4 2.5 4 2.5-4 2.5 4 2.5-3 2.5 3"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
+        </button>
+      </div>
+      <div id="hl-panel-state">Current: <b>OFF</b></div>
+    </section>
+    <!-- ============ /WARN-LIGHT ============ -->
 
     <section class="panel">
       <div class="panel-head">
