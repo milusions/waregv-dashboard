@@ -576,6 +576,22 @@ function subscribeAll() {
     if (!NAVMAP_RE.test(m.name) && !NAVMAP_RE.test(m.msg)) return;
     addLog(String(m.msg).replace(/\s+/g, ' ').trim(), LEVELS[m.level] || 'INFO', prettyName(m.name));
   });
+
+  // --- external arm/disarm (e.g., from another operator or supervisor) ---
+  topic(T.arm, 'std_msgs/msg/Bool', { throttle_rate: 100 }).subscribe(m => {
+    const on = !!m.data;
+    if (on === armed) return;                        // already in sync, skip
+    setArmed(on, { publish: false, silent: true });  // don't echo back
+    addLog('Motors ' + (on ? 'armed' : 'disarmed') + ' (external)', 'WARN', 'Remote');
+  });
+
+  // --- external warn-light mode (e.g., from nav2_status_node.py) ---
+  topic(T.headlight, 'std_msgs/msg/String', { throttle_rate: 100 }).subscribe(m => {
+    const mode = String(m.data || '').trim();
+    if (!HL_MODES.includes(mode) || mode === headlightMode) return;
+    setHeadlight(mode, { publish: false, silent: true });
+    addLog('Warn light: ' + mode + ' (external)', 'INFO', 'Remote');
+  });
 }
 
 // ===== toolbar =====
