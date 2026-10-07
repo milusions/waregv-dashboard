@@ -110,7 +110,7 @@ button.active, button:active { background: var(--primary); color: #fff; }
 .tool:hover::after, .tool:focus-visible::after { opacity: 1; }
 @media (hover: none) { .tool::after { display: none; } }
 
-/* ---------- warn-light toolbox (map overlay, top-center, wider than tall) ---------- */
+/* ---------- warn-light toolbox ---------- */
 #headlight-bar {
   top: 10px;
   left: 50%;
@@ -133,7 +133,6 @@ button.active, button:active { background: var(--primary); color: #fff; }
   margin-right: 4px;
 }
 
-/* shared round icon button for warn-light modes */
 .hl-btn {
   position: relative;
   width: 36px;
@@ -165,7 +164,6 @@ button.active, button:active { background: var(--primary); color: #fff; }
   box-shadow: 0 0 0 4px rgba(255, 180, 0, 0.22);
 }
 
-/* tooltip for warn-light buttons (below, since bar is top-center) */
 .hl-btn::after {
   content: attr(data-tip);
   position: absolute;
@@ -197,7 +195,6 @@ button.active, button:active { background: var(--primary); color: #fff; }
   text-align: center;
 }
 
-/* nav state: bottom-left */
 #nav-state { bottom: 10px; left: 10px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
 
 /* ---------- side panels ---------- */
@@ -244,7 +241,6 @@ button.active, button:active { background: var(--primary); color: #fff; }
   will-change: transform;
   pointer-events: none;
 }
-/* spring-back only on release, never during drag */
 .joy-box:not(.dragging) .joy-knob { transition: transform 0.12s ease-out; }
 
 .panel:fullscreen .joy-box, .panel.maximized .joy-box { max-width: 380px; width: 70vw; }
@@ -298,7 +294,6 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 .arm-btn:active { transform: scale(0.96); }
 .arm-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 
-/* armed state: solid #ff004c */
 .arm-btn[aria-pressed="true"] {
   background: var(--arm);
   border-color: var(--arm);
@@ -346,7 +341,7 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 .panel:fullscreen #hl-panel-row .hl-btn svg, .panel.maximized #hl-panel-row .hl-btn svg { width: 40px; height: 40px; }
 .panel:fullscreen #hl-panel-state, .panel.maximized #hl-panel-state { font-size: 18px; }
 
-#helio-row { display: flex; gap: 6px; }
+#helio-row { display: flex; gap: 6px; align-items: center; }
 #helio-q {
   flex: 1; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text);
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
@@ -373,7 +368,7 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 #log .meta b { color: var(--text); font-weight: 600; }
 #log .msg { margin-top: 2px; font-size: 13px; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
 
-/* ---------- full screen / maximized (fallback for browsers without the Fullscreen API) ---------- */
+/* ---------- full screen / maximized ---------- */
 #map-wrap:fullscreen, #map-wrap.maximized { display: grid; place-items: center; background: var(--bg); }
 #map-wrap.maximized { position: fixed; inset: 0; z-index: 1000; }
 #map-wrap:fullscreen #stage, #map-wrap.maximized #stage { width: min(100vw, calc(100vh * 16 / 9)); }
@@ -398,7 +393,6 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
   .tool { width: 34px; height: 34px; }
   #nav-state { bottom: 6px; left: 6px; font-size: 11px; }
   #log { height: 220px; }
-  /* warn-light bar reflows on small screens: shrink buttons, hide title */
   #headlight-bar { top: 6px; padding: 4px 6px; gap: 4px; max-width: calc(100% - 100px); overflow-x: auto; }
   #headlight-bar .hl-title { display: none; }
   #headlight-bar .hl-btn { width: 30px; height: 30px; flex: 0 0 auto; }
@@ -422,3 +416,136 @@ input:focus { outline: none; border-color: var(--primary); background: #fff; }
 .panel:fullscreen .cam-box, .panel.maximized .cam-box { flex: 1; min-height: 0; aspect-ratio: auto; }
 html:fullscreen { background: var(--bg); overflow: auto; }
 @media (max-width: 600px) { #cams { grid-template-columns: 1fr; } }
+
+/* ---------- Helio dictation button ---------- */
+.mic-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+}
+.mic-btn:hover { background: var(--bg); color: var(--text); }
+.mic-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.mic-icon svg {
+  width: 20px; height: 20px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* bars are hidden until listening */
+.mic-bars {
+  position: absolute; inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.mic-bars i {
+  display: block;
+  width: 3px;
+  height: 8px;
+  border-radius: 2px;
+  background: currentColor;
+  transform-origin: center;
+  animation: mic-bounce 0.9s ease-in-out infinite;
+}
+.mic-bars i:nth-child(1) { animation-delay: -0.36s; }
+.mic-bars i:nth-child(2) { animation-delay: -0.24s; }
+.mic-bars i:nth-child(3) { animation-delay: -0.12s; }
+.mic-bars i:nth-child(4) { animation-delay:  0.00s; }
+.mic-bars i:nth-child(5) { animation-delay:  0.12s; }
+
+@keyframes mic-bounce {
+  0%, 100% { transform: scaleY(0.5); opacity: .55; }
+  50%      { transform: scaleY(1.8); opacity: 1; }
+}
+
+/* listening state — now blue (#0077ff) instead of red */
+.mic-btn.listening {
+  background: #0077ff;
+  border-color: #0077ff;
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(0, 119, 255, 0.22);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+.mic-btn.listening .mic-icon { display: none; }
+.mic-btn.listening .mic-bars { display: flex; }
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(0, 119, 255, 0.22); }
+  50%      { box-shadow: 0 0 0 8px rgba(0, 119, 255, 0.08); }
+}
+
+.mic-btn[hidden] { display: none; }
+
+#helio-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  letter-spacing: .02em;
+}
+
+/* ---------- toast notifications (top-center) ---------- */
+#toast-stack {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  max-width: min(92vw, 460px);
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--primary);
+  box-shadow: 0 6px 20px rgba(0, 40, 80, 0.14);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast .t-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--primary);
+  margin-bottom: 2px;
+}
+.toast .t-body { overflow-wrap: anywhere; }
+.toast.success { border-left-color: #00a03c; }
+.toast.success .t-label { color: #00a03c; }
+.toast.warn    { border-left-color: #ff9500; }
+.toast.warn    .t-label { color: #b36200; }
+.toast.error   { border-left-color: #d43f52; }
+.toast.error   .t-label { color: #b3182f; }
+
+@media (max-width: 600px) {
+  .toast { font-size: 12px; padding: 9px 12px; }
+}

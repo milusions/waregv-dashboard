@@ -184,9 +184,23 @@
         <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
       </div>
       <div id="helio-row">
+        <button id="helio-mic" class="mic-btn" type="button"
+                aria-label="Dictate message" aria-pressed="false" title="Dictate">
+          <span class="mic-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3"/>
+              <path d="M5 11a7 7 0 0 0 14 0"/>
+              <path d="M12 18v3"/>
+            </svg>
+          </span>
+          <span class="mic-bars" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i>
+          </span>
+        </button>
         <input id="helio-q" type="text" placeholder="Ask Helio&hellip;" autocomplete="off">
         <button id="helio-ask">Ask</button>
       </div>
+      <div id="helio-hint" hidden></div>
       <div id="helio-reply"></div>
     </section>
 
@@ -199,6 +213,8 @@
     </section>
   </aside>
 </div>
+
+<div id="toast-stack" aria-live="polite" aria-atomic="true"></div>
 
 <script src="roslib_min.js"></script>
 <script src="app.js"></script>

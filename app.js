@@ -19,8 +19,8 @@ const T = {
   localUpdates:  '/local_costmap/costmap_updates',
   clearGlobal: '/global_costmap/clear_entirely_global_costmap',
   clearLocal:  '/local_costmap/clear_entirely_local_costmap',
-  arm: '/motor_arm',                     // Bool: true = armed, false = disarmed
-  headlight: '/headlight_mode',          // String: OFF | ON | BLINK_2HZ | BLINK_5HZ | PULSE_3 | PULSE_5
+  arm: '/motor_arm',
+  headlight: '/headlight_mode',
 };
 const SPEAK_ON_ROVER = false;
 const BASE_FRAME = 'base_link';
@@ -36,8 +36,6 @@ const getCfg = () => ({
 const NAVMAP_RE = /nav|planner|controller|bt_|behavior|costmap|amcl|slam|map|waypoint|smoother|recovery|lifecycle|goal|path|locali|motor|arm|headlight|warn/i;
 
 // ===== password <-> IP =====
-// Password format: each IPv4 octet zero-padded to 3 digits, concatenated.
-// Example: IP 10.182.52.97  ->  password "010182052097"
 function decodeIp(pass) {
   const s = String(pass || '').trim();
   if (!/^\d{12}$/.test(s)) return null;
@@ -47,7 +45,6 @@ function decodeIp(pass) {
   return nums.join('.');
 }
 
-// Accept either a 12-digit password ("010182052097") or a normal dotted IP ("10.182.52.97")
 function parseIpInput(input) {
   const s = String(input || '').trim();
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
@@ -74,7 +71,6 @@ function connect(ip) {
 }
 
 async function login() {
-  // remembered password from last successful login (stored locally)
   let remembered = localStorage.getItem('pass') || '';
   while (true) {
     const pass = prompt('Password (12-digit rover code, e.g. 010182052097):', remembered);
@@ -95,7 +91,6 @@ async function login() {
       return true;
     } catch (e) {
       alert('rosbridge did not respond at ' + ip + ':' + ROSBRIDGE_PORT);
-      // keep remembered so the user can correct a single digit
       remembered = trimmed;
     }
   }
@@ -125,13 +120,11 @@ const odomX = document.getElementById('odom-x');
 const odomY = document.getElementById('odom-y');
 const odomH = document.getElementById('odom-h');
 
-// arm UI refs + publisher
 const armBtn = document.getElementById('btn-arm');
 const armStateEl = document.getElementById('arm-state');
 let armPub = null;
 let armed = false;
 
-// warn-light UI refs + publisher
 const hlBtns = [...document.querySelectorAll('.hl-btn')];
 const hlStateEl = document.getElementById('hl-state');
 const hlPanelStateEl = document.getElementById('hl-panel-state');
@@ -532,6 +525,59 @@ function prettyName(n) {
 }
 const LEVELS = { 10: 'DEBUG', 20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'FATAL' };
 
+// ===== toast notifications (top-center) =====
+function toast(message, { kind = 'info', label = 'Sent', ms = 3200 } = {}) {
+  const stack = document.getElementById('toast-stack');
+  if (!stack) return;
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  const lab = document.createElement('span');
+  lab.className = 't-label';
+  lab.textContent = label;
+  const body = document.createElement('span');
+  body.className = 't-body';
+  body.textContent = message;
+  const wrap = document.createElement('div');
+  wrap.append(lab, body);
+  el.append(wrap);
+  stack.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  const kill = () => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 220);
+  };
+  el.addEventListener('click', kill);
+  setTimeout(kill, ms);
+}
+
+// ===== tiny Web Audio beeps (no files needed) =====
+let audioCtx = null;
+function getAudioCtx() {
+  if (audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  audioCtx = new AC();
+  return audioCtx;
+}
+function beep(freq, dur = 0.08, vol = 0.18, type = 'sine') {
+  const ac = getAudioCtx();
+  if (!ac) return;
+  if (ac.state === 'suspended') { ac.resume().catch(() => {}); }
+  const now = ac.currentTime;
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, now);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(vol, now + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  osc.connect(gain).connect(ac.destination);
+  osc.start(now);
+  osc.stop(now + dur + 0.02);
+}
+const beepStart = () => { beep(880, 0.09, 0.2, 'sine'); setTimeout(() => beep(1320, 0.07, 0.15, 'sine'), 80); };
+const beepStop  = () => { beep(660, 0.09, 0.18, 'sine'); setTimeout(() => beep(440, 0.09, 0.14, 'sine'), 80); };
+
 // ===== subscriptions =====
 const NAV = { 1: 'ACCEPTED', 2: 'NAVIGATING', 3: 'CANCELING', 4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED' };
 
@@ -577,15 +623,13 @@ function subscribeAll() {
     addLog(String(m.msg).replace(/\s+/g, ' ').trim(), LEVELS[m.level] || 'INFO', prettyName(m.name));
   });
 
-  // --- external arm/disarm (e.g., from another operator or supervisor) ---
   topic(T.arm, 'std_msgs/msg/Bool', { throttle_rate: 100 }).subscribe(m => {
     const on = !!m.data;
-    if (on === armed) return;                        // already in sync, skip
-    setArmed(on, { publish: false, silent: true });  // don't echo back
+    if (on === armed) return;
+    setArmed(on, { publish: false, silent: true });
     addLog('Motors ' + (on ? 'armed' : 'disarmed') + ' (external)', 'WARN', 'Remote');
   });
 
-  // --- external warn-light mode (e.g., from nav2_status_node.py) ---
   topic(T.headlight, 'std_msgs/msg/String', { throttle_rate: 100 }).subscribe(m => {
     const mode = String(m.data || '').trim();
     if (!HL_MODES.includes(mode) || mode === headlightMode) return;
@@ -616,6 +660,8 @@ document.getElementById('btn-home').onclick = () => {
 
 const helioQ = document.getElementById('helio-q');
 const helioReply = document.getElementById('helio-reply');
+const helioHint = document.getElementById('helio-hint');
+const micBtn = document.getElementById('helio-mic');
 
 function pickVoice() {
   const gb = speechSynthesis.getVoices().filter(v => /^en[-_]GB$/i.test(v.lang));
@@ -638,6 +684,17 @@ function speak(text) {
 async function askHelio() {
   const text = helioQ.value.trim();
   if (!text) return;
+
+  // stop dictation first so it can't repopulate the field after we clear it
+  if (listening) stopDictation();
+
+  // clear the input right away
+  helioQ.value = '';
+
+  // notify top-center that the command was sent
+  toast(text, { kind: 'success', label: 'Sent to Helio' });
+  addLog('Helio \u2190 "' + text + '"', 'INFO', 'Helio');
+
   helioReply.textContent = 'Thinking\u2026';
   try {
     const r = await fetch(`http://${IP}:${BACKEND_PORT}/helio/command`, {
@@ -651,10 +708,108 @@ async function askHelio() {
   } catch (e) {
     helioReply.textContent = 'Helio is not connected.';
     speak('Helio is not connected.');
+    toast('Helio is not connected.', { kind: 'error', label: 'Helio' });
   }
 }
 document.getElementById('helio-ask').onclick = askHelio;
 helioQ.addEventListener('keydown', e => { if (e.key === 'Enter') askHelio(); });
+
+// ===== Helio dictation =====
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let listening = false;
+let dictationBase = '';
+let finalTranscript = '';
+let dictationInterim = '';
+
+function setListening(on) {
+  listening = on;
+  micBtn.classList.toggle('listening', on);
+  micBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  micBtn.setAttribute('aria-label', on ? 'Stop dictation' : 'Dictate message');
+  if (helioHint) {
+    helioHint.hidden = !on;
+    helioHint.textContent = on
+      ? 'Listening\u2026 speak now. Tap the mic again to stop, or press Ask to send.'
+      : '';
+  }
+  if (!on) { finalTranscript = ''; dictationInterim = ''; }
+}
+
+function ensureRecognizer() {
+  if (recognizer || !SpeechRec) return recognizer;
+  recognizer = new SpeechRec();
+  recognizer.lang = 'en-GB';
+  recognizer.continuous = true;
+  recognizer.interimResults = true;
+  recognizer.maxAlternatives = 1;
+
+  recognizer.onresult = (ev) => {
+    dictationInterim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      const txt = r[0].transcript;
+      if (r.isFinal) {
+        finalTranscript += (finalTranscript && !/\s$/.test(finalTranscript) ? ' ' : '') + txt.trim();
+      } else {
+        dictationInterim += txt;
+      }
+    }
+    const spoken = (finalTranscript + (dictationInterim ? ' ' + dictationInterim : '')).trim();
+    helioQ.value = (dictationBase ? dictationBase + ' ' : '') + spoken;
+  };
+
+  recognizer.onerror = (ev) => {
+    if (ev.error === 'no-speech' || ev.error === 'aborted') return;
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      toast('Microphone permission was denied.', { kind: 'error', label: 'Dictation' });
+    } else {
+      toast('Dictation error: ' + ev.error, { kind: 'error', label: 'Dictation' });
+    }
+    stopDictation();
+  };
+
+  recognizer.onend = () => {
+    if (listening) {
+      try { recognizer.start(); } catch { /* already running */ }
+    }
+  };
+
+  return recognizer;
+}
+
+function startDictation() {
+  if (!SpeechRec) {
+    toast('Dictation is not supported on this browser.', { kind: 'warn', label: 'Dictation' });
+    return;
+  }
+  const rec = ensureRecognizer();
+  dictationBase = helioQ.value.trim();
+  finalTranscript = '';
+  dictationInterim = '';
+  try { rec.start(); } catch { /* already running */ }
+  setListening(true);
+  beepStart();
+}
+
+function stopDictation() {
+  if (recognizer) {
+    try { recognizer.stop(); } catch { /* not running */ }
+  }
+  if (listening) beepStop();
+  setListening(false);
+}
+
+if (micBtn) {
+  if (!SpeechRec) {
+    micBtn.hidden = true;
+  } else {
+    micBtn.addEventListener('click', () => {
+      if (listening) stopDictation();
+      else startDictation();
+    });
+  }
+}
 
 document.getElementById('btn-cancel').onclick = () => {
   new ROSLIB.Service({ ros, name: T.navCancel, serviceType: 'action_msgs/srv/CancelGoal' })
@@ -766,7 +921,7 @@ joyBox.addEventListener('pointerup', joyEnd);
 joyBox.addEventListener('pointercancel', joyEnd);
 joyBox.addEventListener('lostpointercapture', joyEnd);
 
-window.addEventListener('blur', haltJoystick);
+window.addEventListener('blur', () => { haltJoystick(); if (listening) stopDictation(); });
 
 // ===== start =====
 (async () => {
