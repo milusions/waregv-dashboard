@@ -1,6 +1,6 @@
 // ===== config =====
 const ROSBRIDGE_PORT = 9090;
-const BACKEND_PORT = 8000;
+const BACKEND_PORT = 8001;               // matches uvicorn in main.py
 const CAM_PORT = 5000;                   // camera streamer (MJPEG)
 const CAMS = [['cam-color', '/video_feed'], ['cam-depth', '/depth_feed']];
 const T = {
@@ -19,8 +19,8 @@ const T = {
   localUpdates:  '/local_costmap/costmap_updates',
   clearGlobal: '/global_costmap/clear_entirely_global_costmap',
   clearLocal:  '/local_costmap/clear_entirely_local_costmap',
-  arm: '/motor_arm',
-  headlight: '/headlight_mode',
+  arm: '/motor_arm',                     // Bool: true = armed, false = disarmed
+  headlight: '/headlight_mode',          // String: OFF | ON | BLINK_2HZ | BLINK_5HZ | PULSE_3 | PULSE_5
 };
 const SPEAK_ON_ROVER = false;
 const BASE_FRAME = 'base_link';
@@ -36,6 +36,8 @@ const getCfg = () => ({
 const NAVMAP_RE = /nav|planner|controller|bt_|behavior|costmap|amcl|slam|map|waypoint|smoother|recovery|lifecycle|goal|path|locali|motor|arm|headlight|warn/i;
 
 // ===== password <-> IP =====
+// Password format: each IPv4 octet zero-padded to 3 digits, concatenated.
+// Example: IP 10.182.52.97  ->  password "010182052097"
 function decodeIp(pass) {
   const s = String(pass || '').trim();
   if (!/^\d{12}$/.test(s)) return null;
@@ -45,6 +47,7 @@ function decodeIp(pass) {
   return nums.join('.');
 }
 
+// Accept either a 12-digit password ("010182052097") or a normal dotted IP ("10.182.52.97")
 function parseIpInput(input) {
   const s = String(input || '').trim();
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
@@ -120,11 +123,13 @@ const odomX = document.getElementById('odom-x');
 const odomY = document.getElementById('odom-y');
 const odomH = document.getElementById('odom-h');
 
+// arm UI refs + publisher
 const armBtn = document.getElementById('btn-arm');
 const armStateEl = document.getElementById('arm-state');
 let armPub = null;
 let armed = false;
 
+// warn-light UI refs + publisher
 const hlBtns = [...document.querySelectorAll('.hl-btn')];
 const hlStateEl = document.getElementById('hl-state');
 const hlPanelStateEl = document.getElementById('hl-panel-state');
@@ -623,6 +628,7 @@ function subscribeAll() {
     addLog(String(m.msg).replace(/\s+/g, ' ').trim(), LEVELS[m.level] || 'INFO', prettyName(m.name));
   });
 
+  // --- external arm/disarm (e.g., from another operator or supervisor) ---
   topic(T.arm, 'std_msgs/msg/Bool', { throttle_rate: 100 }).subscribe(m => {
     const on = !!m.data;
     if (on === armed) return;
@@ -630,6 +636,7 @@ function subscribeAll() {
     addLog('Motors ' + (on ? 'armed' : 'disarmed') + ' (external)', 'WARN', 'Remote');
   });
 
+  // --- external warn-light mode (e.g., from nav2_status_node.py) ---
   topic(T.headlight, 'std_msgs/msg/String', { throttle_rate: 100 }).subscribe(m => {
     const mode = String(m.data || '').trim();
     if (!HL_MODES.includes(mode) || mode === headlightMode) return;
@@ -681,36 +688,168 @@ function speak(text) {
   speechSynthesis.speak(u);
 }
 
+// ===== Helio WebSocket client =====
+let helioWs = null;          // the live WebSocket (or null)
+let helioWsPromise = null;   // pending connect() promise
+let helioReq = null;         // { resolve, reject, timer, id } for the in-flight turn
+let helioTurnId = 0;         // monotonically increasing, for matching replies
+
+function helioWsUrl() {
+  return `ws://${IP}:${BACKEND_PORT}/ws/helio`;
+}
+
+function connectHelioWs() {
+  // Reuse the existing socket if it's OPEN or CONNECTING
+  if (helioWs && (helioWs.readyState === WebSocket.OPEN || helioWs.readyState === WebSocket.CONNECTING)) {
+    return helioWsPromise || Promise.resolve(helioWs);
+  }
+
+  helioWsPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    let ws;
+    try {
+      ws = new WebSocket(helioWsUrl());
+    } catch (e) {
+      settled = true;
+      helioWsPromise = null;
+      reject(e);
+      return;
+    }
+    helioWs = ws;
+
+    // 10 s connect timeout
+    const connectTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      helioWsPromise = null;
+      try { ws.close(); } catch {}
+      reject(new Error('connect timeout'));
+    }, 10000);
+
+    ws.onopen = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      addLog('Helio socket connected', 'INFO', 'Helio');
+      resolve(ws);
+    };
+
+    ws.onerror = () => { /* onclose will handle cleanup */ };
+
+    ws.onclose = (ev) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(connectTimer);
+        helioWsPromise = null;
+        reject(new Error(ev.reason || 'socket closed'));
+      }
+      helioWs = null;
+      helioWsPromise = null;
+
+      // Fail any in-flight turn so the UI doesn't hang
+      if (helioReq) {
+        clearTimeout(helioReq.timer);
+        const { reject: rj } = helioReq;
+        helioReq = null;
+        rj(new Error('socket closed'));
+      }
+      addLog('Helio socket closed' + (ev.code ? ` (${ev.code})` : ''), 'WARN', 'Helio');
+    };
+
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+
+      // --- stream frames from the agent ---
+      if (msg.type === 'session') {
+        addLog('Helio session ' + String(msg.conversation_id || '').slice(0, 8), 'INFO', 'Helio');
+        return;
+      }
+      if (msg.type === 'status') {
+        if (msg.stage === 'tool' && msg.message) {
+          addLog(msg.message, 'INFO', 'Helio');
+        } else if (msg.stage === 'thinking') {
+          helioReply.textContent = 'Thinking\u2026';
+        }
+        return;
+      }
+      if (msg.type === 'model' && msg.message) {
+        helioReply.textContent = msg.message;
+        return;
+      }
+      if (msg.type === 'final') {
+        if (helioReq) {
+          clearTimeout(helioReq.timer);
+          const { resolve } = helioReq;
+          helioReq = null;
+          resolve(msg.output || '(no reply)');
+        }
+        return;
+      }
+      if (msg.type === 'error') {
+        if (helioReq) {
+          clearTimeout(helioReq.timer);
+          const { reject } = helioReq;
+          helioReq = null;
+          reject(new Error(msg.message || 'server error'));
+        } else {
+          addLog('Helio error: ' + (msg.message || 'unknown'), 'ERROR', 'Helio');
+        }
+        return;
+      }
+    };
+  });
+
+  return helioWsPromise;
+}
+
 async function askHelio() {
   const text = helioQ.value.trim();
   if (!text) return;
 
-  // stop dictation first so it can't repopulate the field after we clear it
+  // Stop dictation first so it can't refill the field after we clear it
   if (listening) stopDictation();
 
-  // clear the input right away
+  // Clear the textbox immediately
   helioQ.value = '';
 
-  // notify top-center that the command was sent
+  // Notify top-center that the command was sent
   toast(text, { kind: 'success', label: 'Sent to Helio' });
   addLog('Helio \u2190 "' + text + '"', 'INFO', 'Helio');
 
   helioReply.textContent = 'Thinking\u2026';
+
+  // Reject any previous, still-pending turn
+  if (helioReq) {
+    clearTimeout(helioReq.timer);
+    helioReq.reject(new Error('superseded'));
+    helioReq = null;
+  }
+
   try {
-    const r = await fetch(`http://${IP}:${BACKEND_PORT}/helio/command`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, lang: 'en' }),
-      signal: AbortSignal.timeout(5000),
-    }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-    const reply = r.reply || r.text || '(no reply)';
+    const ws = await connectHelioWs();
+
+    const reply = await new Promise((resolve, reject) => {
+      const turnId = ++helioTurnId;
+      const timer = setTimeout(() => {
+        if (helioReq && helioReq.id === turnId) helioReq = null;
+        reject(new Error('timeout'));
+      }, 60000);
+
+      helioReq = { resolve, reject, timer, id: turnId };
+      ws.send(JSON.stringify({ type: 'message', message: text }));
+    });
+
     helioReply.textContent = reply;
     speak(reply);
   } catch (e) {
     helioReply.textContent = 'Helio is not connected.';
     speak('Helio is not connected.');
     toast('Helio is not connected.', { kind: 'error', label: 'Helio' });
+    addLog('Helio error: ' + e.message, 'ERROR', 'Helio');
   }
 }
+
 document.getElementById('helio-ask').onclick = askHelio;
 helioQ.addEventListener('keydown', e => { if (e.key === 'Enter') askHelio(); });
 
@@ -922,6 +1061,7 @@ joyBox.addEventListener('pointercancel', joyEnd);
 joyBox.addEventListener('lostpointercapture', joyEnd);
 
 window.addEventListener('blur', () => { haltJoystick(); if (listening) stopDictation(); });
+window.addEventListener('beforeunload', () => { if (helioWs) { try { helioWs.close(); } catch {} } });
 
 // ===== start =====
 (async () => {
