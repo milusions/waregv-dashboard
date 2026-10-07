@@ -807,8 +807,13 @@ async function askHelio() {
   const text = helioQ.value.trim();
   if (!text) return;
 
-  // Stop dictation first so it can't refill the field after we clear it
-  if (listening) stopDictation();
+  // Stop dictation first so it can't refill the field after we clear it.
+  // Suppress any late final results that may arrive after stop().
+  if (listening) {
+    suppressDictation = true;
+    stopDictation();
+    setTimeout(() => { suppressDictation = false; }, 600);
+  }
 
   // Clear the textbox immediately
   helioQ.value = '';
@@ -851,7 +856,12 @@ async function askHelio() {
 }
 
 document.getElementById('helio-ask').onclick = askHelio;
-helioQ.addEventListener('keydown', e => { if (e.key === 'Enter') askHelio(); });
+helioQ.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    askHelio();
+  }
+});
 
 // ===== Helio dictation =====
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -860,6 +870,7 @@ let listening = false;
 let dictationBase = '';
 let finalTranscript = '';
 let dictationInterim = '';
+let suppressDictation = false;   // ignore late results after we stop mid-turn
 
 function setListening(on) {
   listening = on;
@@ -884,6 +895,7 @@ function ensureRecognizer() {
   recognizer.maxAlternatives = 1;
 
   recognizer.onresult = (ev) => {
+    if (suppressDictation) return;   // don't refill the field after Ask
     dictationInterim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
@@ -909,7 +921,7 @@ function ensureRecognizer() {
   };
 
   recognizer.onend = () => {
-    if (listening) {
+    if (listening && !suppressDictation) {
       try { recognizer.start(); } catch { /* already running */ }
     }
   };
