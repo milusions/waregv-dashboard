@@ -29,28 +29,19 @@
         <label><input type="checkbox" data-layer="path" checked><span class="sw" data-color="path"></span>Nav2 path</label>
       </details>
 
-      <!-- warn-light toolbox: top-center, wider than tall, 6 icon buttons -->
-      <div id="headlight-bar" class="overlay" role="toolbar" aria-label="Warn light mode">
-        <span class="hl-title">Warn</span>
-        <button class="hl-btn" data-mode="OFF"       data-tip="Off"        aria-label="Warn light off">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 4l16 16"/></svg>
-        </button>
-        <button class="hl-btn" data-mode="ON"        data-tip="Steady on"  aria-label="Warn light steady on">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
-        </button>
-        <button class="hl-btn" data-mode="BLINK_2HZ" data-tip="Blink 2 Hz" aria-label="Warn light blink 2 hertz">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M6 9l-3-3M18 15l3 3"/></svg>
-        </button>
-        <button class="hl-btn" data-mode="BLINK_5HZ" data-tip="Blink 5 Hz" aria-label="Warn light blink 5 hertz">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M4 8l-2-4M20 16l2 4M4 16l-2 4M20 8l2-4"/></svg>
-        </button>
-        <button class="hl-btn" data-mode="PULSE_3"   data-tip="Pulse x3"   aria-label="Warn light pulse three times">
-          <svg viewBox="0 0 24 24"><path d="M3 14l3-3 3 3 4-5 4 5 4-5"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
-        </button>
-        <button class="hl-btn" data-mode="PULSE_5"   data-tip="Pulse x5"   aria-label="Warn light pulse five times">
-          <svg viewBox="0 0 24 24"><path d="M2 14l2.5-3 2.5 3 2.5-4 2.5 4 2.5-4 2.5 4 2.5-3 2.5 3"/><circle cx="12" cy="12" r="9" opacity="0.35"/></svg>
-        </button>
-        <span id="hl-state" class="hl-state">OFF</span>
+      <!-- Ask Helio: top-center -->
+      <div id="helio-bar" class="overlay">
+        <div id="helio-row">
+          <button id="helio-mic" class="mic-btn" type="button" aria-label="Dictate message" aria-pressed="false" title="Dictate">
+            <span class="mic-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></span>
+            <span class="mic-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          </button>
+          <input id="helio-q" type="text" placeholder="Ask Helio&hellip;  or say &quot;Hey robot&quot;" autocomplete="off">
+          <button id="helio-ask">Ask</button>
+          <button id="helio-wake" type="button" class="wake-btn" aria-pressed="false" title="Wake word &quot;Hey robot&quot;">Hey robot: off</button>
+        </div>
+        <div id="helio-hint" hidden></div>
+        <div id="helio-reply"></div>
       </div>
 
       <!-- toolbar with tooltips: top-right -->
@@ -176,32 +167,6 @@
         <div class="odom-row"><span class="odom-label">Y</span><span id="odom-y" class="odom-val">--</span></div>
         <div class="odom-row"><span class="odom-label">Heading</span><span id="odom-h" class="odom-val">--</span></div>
       </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Ask Helio</h2>
-        <button class="fs" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
-      </div>
-      <div id="helio-row">
-        <button id="helio-mic" class="mic-btn" type="button"
-                aria-label="Dictate message" aria-pressed="false" title="Dictate">
-          <span class="mic-icon">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="9" y="3" width="6" height="11" rx="3"/>
-              <path d="M5 11a7 7 0 0 0 14 0"/>
-              <path d="M12 18v3"/>
-            </svg>
-          </span>
-          <span class="mic-bars" aria-hidden="true">
-            <i></i><i></i><i></i><i></i><i></i>
-          </span>
-        </button>
-        <input id="helio-q" type="text" placeholder="Ask Helio&hellip;" autocomplete="off">
-        <button id="helio-ask">Ask</button>
-      </div>
-      <div id="helio-hint" hidden></div>
-      <div id="helio-reply"></div>
     </section>
 
     <section class="panel">

@@ -581,6 +581,17 @@ function beep(freq, dur = 0.08, vol = 0.18, type = 'sine') {
   osc.stop(now + dur + 0.02);
 }
 const beepStart = () => { beep(880, 0.09, 0.2, 'sine'); setTimeout(() => beep(1320, 0.07, 0.15, 'sine'), 80); };
+// thinking sound: soft rising/falling blips on a loop until Helio replies
+let thinkTimer = null;
+const THINK_NOTES = [440, 523, 659, 523];
+function thinkStart() {
+  thinkStop();
+  let i = 0;
+  const tick = () => { beep(THINK_NOTES[i++ % THINK_NOTES.length], 0.12, 0.08, 'sine'); };
+  tick();
+  thinkTimer = setInterval(tick, 450);
+}
+function thinkStop() { if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; } }
 const beepStop  = () => { beep(660, 0.09, 0.18, 'sine'); setTimeout(() => beep(440, 0.09, 0.14, 'sine'), 80); };
 
 // ===== subscriptions =====
@@ -809,11 +820,10 @@ async function askHelio() {
 
   // Stop dictation first so it can't refill the field after we clear it.
   // Suppress any late final results that may arrive after stop().
-  if (listening) {
-    suppressDictation = true;
-    stopDictation();
-    setTimeout(() => { suppressDictation = false; }, 600);
-  }
+  clearTimeout(silenceTimer);
+  suppressDictation = true;
+  if (listening) stopDictation();
+  setTimeout(() => { suppressDictation = false; }, 600);
 
   // Clear the textbox immediately
   helioQ.value = '';
@@ -823,6 +833,7 @@ async function askHelio() {
   addLog('Helio \u2190 "' + text + '"', 'INFO', 'Helio');
 
   helioReply.textContent = 'Thinking\u2026';
+  thinkStart();
 
   // Reject any previous, still-pending turn
   if (helioReq) {
@@ -845,9 +856,11 @@ async function askHelio() {
       ws.send(JSON.stringify({ type: 'message', message: text }));
     });
 
+    thinkStop();
     helioReply.textContent = reply;
     speak(reply);
   } catch (e) {
+    if (e.message !== 'superseded') thinkStop();
     helioReply.textContent = 'Helio is not connected.';
     speak('Helio is not connected.');
     toast('Helio is not connected.', { kind: 'error', label: 'Helio' });
@@ -863,14 +876,52 @@ helioQ.addEventListener('keydown', e => {
   }
 });
 
-// ===== Helio dictation =====
+// ===== Helio dictation + "Hey robot" wake word =====
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
-let listening = false;
-let dictationBase = '';
-let finalTranscript = '';
-let dictationInterim = '';
-let suppressDictation = false;   // ignore late results after we stop mid-turn
+const wakeBtn = document.getElementById('helio-wake');
+// Fuzzy wake-word matcher: tolerates mishearings ("hay row bot", "hi robo", "hey rowboat"...)
+const HEY_WORDS = new Set(['hey','hay','hi','hei','hello','hallo','ay','aye','a','eh','he','okay','ok','yo','hey,','heyy','hay.']);
+const ROBOT_WORDS = new Set(['robot','robots','roboto','robo','robat','robit','robbot','rowbot','rowboat','roebot','rodbot','rebot','reboot','rabbit','robert','robotic','roboat','rowbat']);
+function lev(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+const isHey = t => HEY_WORDS.has(t) || (t.length >= 2 && lev(t, 'hey') <= 1);
+const isRobot = t => ROBOT_WORDS.has(t) || (t.length >= 4 && lev(t, 'robot') <= 1);
+// returns the string index just after the wake phrase, or null
+function findWake(text) {
+  const toks = [];
+  text.toLowerCase().replace(/[a-z']+/g, (w, idx) => { toks.push({ w, end: idx + w.length }); return w; });
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i].w;
+    if (isHey(t)) {
+      if (toks[i+1] && isRobot(toks[i+1].w)) return toks[i+1].end;
+      if (toks[i+2] && isRobot(toks[i+1].w + toks[i+2].w)) return toks[i+2].end;   // "row bot", "ro bot"
+      if (toks[i+2] && isRobot(toks[i+2].w) && toks[i+1].w.length <= 3) return toks[i+2].end; // "hey a robot"
+    }
+    if (t === 'robot' || t === 'robo' || t === 'roboto') return toks[i].end;   // lone "robot"
+  }
+  return null;
+}
+const SILENCE_MS = 1500;      // silence after speech -> auto send
+const NO_SPEECH_MS = 6000;    // woke but nothing said -> back to sleep
+let recognizer = null, recRunning = false;
+let wakeEnabled = true;       // always-listening for "Hey robot"
+let listening = false;        // true while dictating into the field
+let dictStart = 0, dictSkipText = '';   // first result index of this dictation
+let ignoreBefore = 0, lastLen = 0;
+let silenceTimer = null;
+let suppressDictation = false;
+
+function updateWakeBtn() {
+  if (!wakeBtn) return;
+  wakeBtn.textContent = 'Hey robot: ' + (wakeEnabled ? 'on' : 'off');
+  wakeBtn.setAttribute('aria-pressed', wakeEnabled ? 'true' : 'false');
+  wakeBtn.classList.toggle('active', wakeEnabled);
+}
 
 function setListening(on) {
   listening = on;
@@ -879,11 +930,39 @@ function setListening(on) {
   micBtn.setAttribute('aria-label', on ? 'Stop dictation' : 'Dictate message');
   if (helioHint) {
     helioHint.hidden = !on;
-    helioHint.textContent = on
-      ? 'Listening\u2026 speak now. Tap the mic again to stop, or press Ask to send.'
-      : '';
+    helioHint.textContent = on ? 'Listening\u2026 stop speaking to send.' : '';
   }
-  if (!on) { finalTranscript = ''; dictationInterim = ''; }
+}
+
+function dictatedText(ev) {
+  let s = '';
+  for (let i = dictStart; i < ev.results.length; i++) {
+    const res = ev.results[i];
+    let t = res[0].transcript;
+    if (i === dictStart) {
+      for (let k = 0; k < res.length; k++) {   // use whichever alternative contained the wake word
+        const e = findWake(res[k].transcript);
+        if (e !== null) { t = res[k].transcript.slice(e); break; }
+      }
+    }
+    s += (s ? ' ' : '') + t.trim();
+  }
+  return s.trim();
+}
+
+function armSilence(ms) {
+  clearTimeout(silenceTimer);
+  silenceTimer = setTimeout(() => {
+    if (!listening) return;
+    if (helioQ.value.trim()) askHelio();
+    else stopDictation();
+  }, ms);
+}
+
+function startRec() {
+  const rec = ensureRecognizer();
+  if (!rec || recRunning) return;
+  try { rec.start(); } catch { /* already running */ }
 }
 
 function ensureRecognizer() {
@@ -892,74 +971,93 @@ function ensureRecognizer() {
   recognizer.lang = 'en-GB';
   recognizer.continuous = true;
   recognizer.interimResults = true;
-  recognizer.maxAlternatives = 1;
+  recognizer.maxAlternatives = 5;
+
+  recognizer.onstart = () => { recRunning = true; lastLen = 0; ignoreBefore = 0; if (listening) dictStart = 0; };
 
   recognizer.onresult = (ev) => {
-    if (suppressDictation) return;   // don't refill the field after Ask
-    dictationInterim = '';
-    for (let i = ev.resultIndex; i < ev.results.length; i++) {
-      const r = ev.results[i];
-      const txt = r[0].transcript;
-      if (r.isFinal) {
-        finalTranscript += (finalTranscript && !/\s$/.test(finalTranscript) ? ' ' : '') + txt.trim();
-      } else {
-        dictationInterim += txt;
+    lastLen = ev.results.length;
+    if (suppressDictation) return;
+    if (!listening) {
+      if (!wakeEnabled || (window.speechSynthesis && speechSynthesis.speaking)) return;
+      for (let i = Math.max(ev.resultIndex, ignoreBefore); i < ev.results.length; i++) {
+        const r = ev.results[i];
+        let hit = false;
+        for (let k = 0; k < r.length; k++) if (findWake(r[k].transcript) !== null) { hit = true; break; }
+        if (hit) {
+          dictStart = i;
+          helioQ.value = '';
+          setListening(true);
+          beepStart();
+          const rest = dictatedText(ev);
+          helioQ.value = rest;
+          armSilence(rest ? SILENCE_MS : NO_SPEECH_MS);
+          return;
+        }
       }
+      return;
     }
-    const spoken = (finalTranscript + (dictationInterim ? ' ' + dictationInterim : '')).trim();
-    helioQ.value = (dictationBase ? dictationBase + ' ' : '') + spoken;
+    helioQ.value = dictatedText(ev);
+    if (helioQ.value) armSilence(SILENCE_MS);
   };
 
   recognizer.onerror = (ev) => {
     if (ev.error === 'no-speech' || ev.error === 'aborted') return;
     if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
       toast('Microphone permission was denied.', { kind: 'error', label: 'Dictation' });
-    } else {
+      wakeEnabled = false; updateWakeBtn();
+      if (listening) setListening(false);
+    } else if (ev.error !== 'network') {
       toast('Dictation error: ' + ev.error, { kind: 'error', label: 'Dictation' });
     }
-    stopDictation();
   };
 
   recognizer.onend = () => {
-    if (listening && !suppressDictation) {
-      try { recognizer.start(); } catch { /* already running */ }
-    }
+    recRunning = false;
+    if (wakeEnabled || listening) setTimeout(startRec, 250);   // keep the session alive
   };
-
   return recognizer;
 }
 
-function startDictation() {
-  if (!SpeechRec) {
-    toast('Dictation is not supported on this browser.', { kind: 'warn', label: 'Dictation' });
-    return;
-  }
-  const rec = ensureRecognizer();
-  dictationBase = helioQ.value.trim();
-  finalTranscript = '';
-  dictationInterim = '';
-  try { rec.start(); } catch { /* already running */ }
+function startDictation() {            // manual (mic button)
+  if (!SpeechRec) { toast('Dictation is not supported on this browser.', { kind: 'warn', label: 'Dictation' }); return; }
+  dictStart = lastLen;                 // only words spoken from now on
+  helioQ.value = '';
   setListening(true);
   beepStart();
+  startRec();
+  armSilence(NO_SPEECH_MS);
 }
 
 function stopDictation() {
-  if (recognizer) {
-    try { recognizer.stop(); } catch { /* not running */ }
-  }
+  clearTimeout(silenceTimer);
   if (listening) beepStop();
+  ignoreBefore = lastLen;              // don't re-trigger wake on old speech
   setListening(false);
+  if (!wakeEnabled && recognizer && recRunning) { try { recognizer.stop(); } catch {} }
 }
 
 if (micBtn) {
-  if (!SpeechRec) {
-    micBtn.hidden = true;
-  } else {
-    micBtn.addEventListener('click', () => {
-      if (listening) stopDictation();
-      else startDictation();
-    });
-  }
+  if (!SpeechRec) micBtn.hidden = true;
+  else micBtn.addEventListener('click', () => (listening ? stopDictation() : startDictation()));
+}
+
+if (wakeBtn) {
+  if (!SpeechRec) wakeBtn.hidden = true;
+  else wakeBtn.addEventListener('click', () => {
+    wakeEnabled = !wakeEnabled; updateWakeBtn();
+    if (wakeEnabled) startRec();
+    else if (!listening && recognizer && recRunning) { try { recognizer.stop(); } catch {} }
+  });
+}
+
+// Start wake listening; browsers may need one user gesture before mic access.
+if (SpeechRec) {
+  updateWakeBtn();
+  startRec();
+  const kick = () => { if (wakeEnabled) startRec(); };
+  window.addEventListener('pointerdown', kick, { once: true });
+  window.addEventListener('keydown', kick, { once: true });
 }
 
 document.getElementById('btn-cancel').onclick = () => {
